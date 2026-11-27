@@ -1,0 +1,415 @@
+import type { AgentEligibility, NodeAgentInfo } from '../types/k8s.js';
+
+export const TSURE_PREFIX = 'tsure.io/';
+export const CLOUDFLARED_RESOURCE_PREFIX = 'cloudflared-';
+export const CLOUDFLARED_MANAGED_LABEL_KEY = 'tsure.io/cloudflared';
+export const CLOUDFLARED_NODE_LABEL_PREFIX = 'tsure.io/cloudflared-';
+export const KLARED_NS_LABEL_PREFIX = 'tsure.io/klared-';
+
+export const TUNNEL_ID_ANNOTATION = 'tsure.io/tunnel-id';
+export const AGENTS_ANNOTATION = 'tsure.io/agents';
+export const DESCRIPTION_ANNOTATION = 'tsure.io/description';
+export const DESIRED_REPLICAS_ANNOTATION = 'tsure.io/desired-replicas';
+
+export const K8S_NODE_SELECTOR_ANNOTATION =
+  'scheduler.alpha.kubernetes.io/node-selector';
+export const TSURE_NODE_SELECTOR_ANNOTATION = 'tsure.io/node-selector';
+
+export const DEFAULT_CLOUDFLARED_VERSION = '2026.2.0';
+
+export const PROTECTED_NAMESPACES = new Set<string>([
+  'default',
+  'kube-system',
+  'kube-public',
+  'kube-node-lease',
+  'cnpg-system',
+]);
+
+const DNS_1123_REGEX = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+const LABEL_KEY_PREFIX_REGEX =
+  /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+const LABEL_NAME_REGEX = /^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$/;
+const LABEL_VALUE_REGEX = /^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$/;
+const TUNNEL_ID_REGEX = /^[a-f0-9]{6,8}$/;
+const IMAGE_TAG_REGEX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** Max logical tunnel name length so "cloudflared-<name>" stays <= 63 chars */
+export const MAX_TUNNEL_NAME_LENGTH = 63 - CLOUDFLARED_RESOURCE_PREFIX.length;
+
+export function isProtectedNamespace(name: string): boolean {
+  return PROTECTED_NAMESPACES.has(name);
+}
+
+export function buildResourceName(tunnelName: string): string {
+  return `${CLOUDFLARED_RESOURCE_PREFIX}${tunnelName.trim()}`;
+}
+
+export function extractTunnelLogicalName(resourceName: string): string {
+  if (resourceName.startsWith(CLOUDFLARED_RESOURCE_PREFIX)) {
+    return resourceName.slice(CLOUDFLARED_RESOURCE_PREFIX.length);
+  }
+  return resourceName;
+}
+
+export function buildNodeLabelKey(tunnelId: string): string {
+  return `${CLOUDFLARED_NODE_LABEL_PREFIX}${tunnelId}`;
+}
+
+export function buildNamespaceLabelKey(tunnelId: string): string {
+  return `${KLARED_NS_LABEL_PREFIX}${tunnelId}`;
+}
+
+export function validateDns1123Name(
+  name: string,
+  fieldLabel = 'nombre',
+  maxLength = 63,
+): { valid: boolean; error?: string } {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return { valid: false, error: `El ${fieldLabel} es obligatorio.` };
+  }
+  if (trimmed.length > maxLength) {
+    return {
+      valid: false,
+      error: `Máximo ${maxLength} caracteres según la norma DNS-1123.`,
+    };
+  }
+  if (!DNS_1123_REGEX.test(trimmed)) {
+    return {
+      valid: false,
+      error:
+        'Solo minúsculas (a-z), números (0-9) y guiones medios; debe iniciar y terminar en alfanumérico.',
+    };
+  }
+  return { valid: true };
+}
+
+export function validateTunnelName(name: string): {
+  valid: boolean;
+  error?: string;
+} {
+  const trimmed = name.trim();
+  if (trimmed.startsWith(CLOUDFLARED_RESOURCE_PREFIX)) {
+    return {
+      valid: false,
+      error: 'No incluyas el prefijo "cloudflared-"; se añade automáticamente.',
+    };
+  }
+  return validateDns1123Name(trimmed, 'nombre del túnel', MAX_TUNNEL_NAME_LENGTH);
+}
+
+export function validateTunnelId(id: string): boolean {
+  return TUNNEL_ID_REGEX.test(id);
+}
+
+export function validateImageVersion(version: string): {
+  valid: boolean;
+  normalized: string;
+  error?: string;
+} {
+  const trimmed = version.trim();
+  if (!trimmed) {
+    return {
+      valid: false,
+      normalized: '',
+      error: 'La versión de imagen es obligatoria.',
+    };
+  }
+  if (trimmed.toLowerCase() === 'latest') {
+    return {
+      valid: false,
+      normalized: trimmed,
+      error: 'No se permite el tag "latest". Usa una versión fija (ej. 2026.2.0).',
+    };
+  }
+  if (!IMAGE_TAG_REGEX.test(trimmed)) {
+    return {
+      valid: false,
+      normalized: trimmed,
+      error: 'Tag de imagen inválido. Ejemplo válido: 2026.2.0',
+    };
+  }
+  return { valid: true, normalized: trimmed };
+}
+
+/**
+ * Accepts either a raw Cloudflare tunnel token or a full command copied from
+ * Cloudflare Zero Trust (e.g. `cloudflared service install <TOKEN>` or
+ * `cloudflared tunnel run --token <TOKEN>`).
+ */
+export function extractTunnelToken(rawInput: string): {
+  valid: boolean;
+  token: string;
+  extractedFromCommand: boolean;
+  error?: string;
+} {
+  const trimmed = rawInput.trim();
+  if (!trimmed) {
+    return {
+      valid: false,
+      token: '',
+      extractedFromCommand: false,
+      error: 'El token del túnel es obligatorio.',
+    };
+  }
+
+  let candidate = trimmed;
+  let extractedFromCommand = false;
+
+  // Match `--token <TOKEN>` or `--token=<TOKEN>`
+  const flagMatch = trimmed.match(/--token(?:=|\s+)['"]?([^\s'"]+)['"]?/i);
+  if (flagMatch?.[1]) {
+    candidate = flagMatch[1];
+    extractedFromCommand = true;
+  } else {
+    // Match `service install <TOKEN>`
+    const installMatch = trimmed.match(/\bservice\s+install\s+['"]?([^\s'"]+)['"]?/i);
+    if (installMatch?.[1]) {
+      candidate = installMatch[1];
+      extractedFromCommand = true;
+    } else {
+      // Match `TUNNEL_TOKEN=<TOKEN>`
+      const envMatch = trimmed.match(/\bTUNNEL_TOKEN=['"]?([^\s'"]+)['"]?/);
+      if (envMatch?.[1]) {
+        candidate = envMatch[1];
+        extractedFromCommand = true;
+      }
+    }
+  }
+
+  // Strip surrounding quotes if pasted directly with quotes
+  candidate = candidate.replace(/^['"]+|['"]+$/g, '').trim();
+
+  if (/\s/.test(candidate)) {
+    return {
+      valid: false,
+      token: '',
+      extractedFromCommand,
+      error: 'El token no debe contener espacios ni saltos de línea.',
+    };
+  }
+
+  if (candidate.length < 16) {
+    return {
+      valid: false,
+      token: '',
+      extractedFromCommand,
+      error: 'El token parece demasiado corto. Pega el token completo de Cloudflare.',
+    };
+  }
+
+  if (!/^[A-Za-z0-9._~+/=-]+$/.test(candidate)) {
+    return {
+      valid: false,
+      token: '',
+      extractedFromCommand,
+      error: 'El token contiene caracteres inválidos.',
+    };
+  }
+
+  return {
+    valid: true,
+    token: candidate,
+    extractedFromCommand,
+  };
+}
+
+export function maskTokenForDisplay(token: string, maxBullets = 28): string {
+  if (!token) return '';
+  return '•'.repeat(Math.min(token.length, maxBullets));
+}
+
+export function redactSecrets(text: string, secrets: string[]): string {
+  let result = text;
+  for (const secret of secrets) {
+    if (secret && secret.length >= 8) {
+      result = result.split(secret).join('[REDACTED]');
+    }
+  }
+  return result;
+}
+
+export interface NodeSelectorPair {
+  key: string;
+  value: string;
+}
+
+function isValidLabelKey(key: string): boolean {
+  const parts = key.split('/');
+  if (parts.length > 2) return false;
+  if (parts.length === 1) {
+    const name = parts[0] ?? '';
+    return name.length > 0 && name.length <= 63 && LABEL_NAME_REGEX.test(name);
+  }
+  const [prefix, name] = parts;
+  if (!prefix || !name) return false;
+  if (prefix.length > 253 || name.length > 63) return false;
+  return LABEL_KEY_PREFIX_REGEX.test(prefix) && LABEL_NAME_REGEX.test(name);
+}
+
+export function parseNodeSelector(raw: string | null | undefined): {
+  valid: boolean;
+  normalized: string | null;
+  pairs: NodeSelectorPair[];
+  error?: string;
+} {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) {
+    return { valid: true, normalized: null, pairs: [] };
+  }
+
+  const segments = trimmed.split(',').map((s) => s.trim());
+  const pairs: NodeSelectorPair[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const segment of segments) {
+    if (!segment) {
+      return {
+        valid: false,
+        normalized: null,
+        pairs: [],
+        error: 'Selector vacío entre comas.',
+      };
+    }
+
+    const eqIndex = segment.indexOf('=');
+    if (eqIndex <= 0) {
+      return {
+        valid: false,
+        normalized: null,
+        pairs: [],
+        error: `Formato inválido "${segment}". Debe ser clave=valor.`,
+      };
+    }
+
+    const key = segment.slice(0, eqIndex).trim();
+    const value = segment.slice(eqIndex + 1).trim();
+
+    if (!isValidLabelKey(key)) {
+      return {
+        valid: false,
+        normalized: null,
+        pairs: [],
+        error: `Clave de selector inválida: "${key}".`,
+      };
+    }
+
+    if (value.length > 63 || !LABEL_VALUE_REGEX.test(value)) {
+      return {
+        valid: false,
+        normalized: null,
+        pairs: [],
+        error: `Valor de selector inválido: "${value}".`,
+      };
+    }
+
+    if (seenKeys.has(key)) {
+      return {
+        valid: false,
+        normalized: null,
+        pairs: [],
+        error: `Clave duplicada en selector: "${key}".`,
+      };
+    }
+
+    seenKeys.add(key);
+    pairs.push({ key, value });
+  }
+
+  const normalized = pairs.map((p) => `${p.key}=${p.value}`).join(',');
+  return { valid: true, normalized, pairs };
+}
+
+export function matchNodesForSelector(
+  selector: string | null | undefined,
+  nodes: NodeAgentInfo[],
+): NodeAgentInfo[] {
+  if (!selector) {
+    return nodes;
+  }
+  const parsed = parseNodeSelector(selector);
+  if (!parsed.valid || parsed.pairs.length === 0) {
+    return [];
+  }
+  return nodes.filter((node) =>
+    parsed.pairs.every(({ key, value }) => node.labels[key] === value),
+  );
+}
+
+export function formatNodeSelectorDisplay(selector: string | null | undefined): string {
+  if (!selector) {
+    return 'Cualquiera';
+  }
+  const parsed = parseNodeSelector(selector);
+  if (!parsed.valid || parsed.pairs.length === 0) {
+    return selector;
+  }
+  if (parsed.pairs.length === 1) {
+    const pair = parsed.pairs[0]!;
+    if (pair.key === 'kubernetes.io/hostname') {
+      return pair.value;
+    }
+    if (pair.key.startsWith('node-role.kubernetes.io/')) {
+      const role = pair.key.slice('node-role.kubernetes.io/'.length);
+      return `rol:${role}`;
+    }
+  }
+  return selector;
+}
+
+/**
+ * Evaluates which worker agents (excluding control-plane/master) are eligible
+ * for a tunnel given the namespace's read-only node-selector affinity.
+ */
+export function computeAgentEligibility(
+  nodes: NodeAgentInfo[],
+  namespaceSelector: string | null | undefined,
+): AgentEligibility[] {
+  const workerAgents = nodes.filter((n) => !n.isControlPlane);
+  const matchedSet = new Set(
+    matchNodesForSelector(namespaceSelector, workerAgents).map((a) => a.name),
+  );
+  const selectorDisplay = formatNodeSelectorDisplay(namespaceSelector);
+
+  return workerAgents.map((agent) => {
+    const matchesNamespace = matchedSet.has(agent.name);
+    if (!agent.ready) {
+      return {
+        agent,
+        eligible: false,
+        matchesNamespace,
+        disabledReason: 'Agente NotReady',
+      };
+    }
+    if (agent.unschedulable) {
+      return {
+        agent,
+        eligible: false,
+        matchesNamespace,
+        disabledReason: 'SchedulingDisabled (cordon)',
+      };
+    }
+    if (!matchesNamespace) {
+      return {
+        agent,
+        eligible: false,
+        matchesNamespace: false,
+        disabledReason: `Incompatible con afinidad del namespace (${selectorDisplay})`,
+      };
+    }
+    return {
+      agent,
+      eligible: true,
+      matchesNamespace: true,
+      disabledReason: null,
+    };
+  });
+}
+
+export function extractImageVersion(image: string): string {
+  const idx = image.lastIndexOf(':');
+  if (idx <= 0 || idx === image.length - 1) {
+    return '-';
+  }
+  return image.slice(idx + 1);
+}
