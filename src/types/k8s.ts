@@ -19,6 +19,21 @@ export interface AgentEligibility {
   disabledReason: string | null;
 }
 
+export interface NodeLabelOption {
+  key: string;
+  value: string;
+  /** Normalized selector: "key=value" (or "key" when value is empty) */
+  selector: string;
+  /** Short label for compact UI panels (e.g. "flotip") */
+  shortLabel: string;
+  /** Worker agent names carrying this label */
+  nodes: string[];
+  /** Ready & schedulable worker agent names carrying this label */
+  readyNodes: string[];
+  /** True for standard Kubernetes/k3s builtin node labels */
+  isSystem: boolean;
+}
+
 export interface NamespaceMeta {
   name: string;
   phase: string;
@@ -92,6 +107,8 @@ export interface TunnelInfo {
   statusLabel: string;
   /** Namespace node-selector read-only from k3access */
   namespaceNodeSelector: string | null;
+  /** Optional extra node label affinity applied to the Deployment (e.g. "flotip=true") */
+  extraNodeLabel: string | null;
   /** Non-tunnel app pods running in this namespace (for tailnet cross-node hint) */
   appPodNodes: string[];
   crossNodeTrafficWarning: boolean;

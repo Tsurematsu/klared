@@ -4,12 +4,16 @@ import {
   buildNamespaceLabelKey,
   buildNodeLabelKey,
   buildResourceName,
+  collectClusterNodeLabels,
   computeAgentEligibility,
   extractTunnelProtocol,
   extractTunnelToken,
+  formatCompactNodeLabel,
   formatNodeSelectorDisplay,
   maskTokenForDisplay,
+  matchNodesForLabelAffinity,
   parseNodeSelector,
+  parseSingleNodeLabelSelector,
   redactSecrets,
   summarizeCloudflaredLogDiagnostic,
   validateImageVersion,
@@ -246,5 +250,81 @@ describe('Protocolo de túnel y diagnóstico de logs cloudflared', () => {
       'INF Starting tunnel\nERR some unexpected edge error\nINF other info',
     );
     assert.match(errHint, /some unexpected edge error/);
+  });
+});
+
+describe('Labels de nodo del clúster (afinidad y descubrimiento)', () => {
+  it('parsea, formatea y filtra labels de nodo correctamente', () => {
+    assert.deepEqual(parseSingleNodeLabelSelector('flotip=true'), {
+      valid: true,
+      selector: 'flotip=true',
+      key: 'flotip',
+      value: 'true',
+    });
+    assert.deepEqual(parseSingleNodeLabelSelector('flotip'), {
+      valid: true,
+      selector: 'flotip',
+      key: 'flotip',
+      value: null,
+    });
+    assert.equal(parseSingleNodeLabelSelector('bad key=1').valid, false);
+
+    assert.equal(formatCompactNodeLabel(null), 'ninguno');
+    assert.equal(formatCompactNodeLabel('flotip=true'), 'flotip');
+    assert.equal(formatCompactNodeLabel('tsure.io/flotip=true'), 'flotip');
+    assert.equal(formatCompactNodeLabel('tsure.io/tier=edge'), 'tier=edge');
+  });
+
+  it('descubre labels custom primero, excluye control-plane y tsure.io/cloudflared-*', () => {
+    const nodesWithCustom: NodeAgentInfo[] = [
+      {
+        ...MOCK_NODES[0]!,
+        labels: {
+          ...MOCK_NODES[0]!.labels,
+          'only-server': 'true',
+        },
+      },
+      {
+        ...MOCK_NODES[1]!,
+        labels: {
+          ...MOCK_NODES[1]!.labels,
+          flotip: 'true',
+          'tsure.io/cloudflared-a1b2c3': 'true',
+        },
+        cloudflaredIds: ['a1b2c3'],
+      },
+      {
+        ...MOCK_NODES[2]!,
+        labels: {
+          ...MOCK_NODES[2]!.labels,
+          tier: 'edge',
+        },
+      },
+    ];
+
+    const discovered = collectClusterNodeLabels(nodesWithCustom);
+    assert.equal(
+      discovered.some((l) => l.key === 'only-server'),
+      false,
+    );
+    assert.equal(
+      discovered.some((l) => l.key === 'tsure.io/cloudflared-a1b2c3'),
+      false,
+    );
+
+    // Custom labels appear before system labels
+    const customLabels = discovered.filter((l) => !l.isSystem);
+    assert.deepEqual(
+      customLabels.map((l) => l.selector),
+      ['flotip=true', 'tier=edge'],
+    );
+    assert.equal(customLabels[0]?.shortLabel, 'flotip');
+    assert.deepEqual(customLabels[0]?.readyNodes, ['k3s-agent1']);
+
+    const matched = matchNodesForLabelAffinity('flotip=true', nodesWithCustom);
+    assert.deepEqual(
+      matched.map((n) => n.name),
+      ['k3s-agent1'],
+    );
   });
 });

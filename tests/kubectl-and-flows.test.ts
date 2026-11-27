@@ -9,7 +9,9 @@ import {
   buildOrphanAuditReport,
   deleteTunnel,
   installTunnel,
+  scaleTunnelReplicas,
   updateTunnelAssignment,
+  updateTunnelNodeLabelAffinity,
 } from '../src/services/tunnels.js';
 import type { NodeAgentInfo, TunnelInfo } from '../src/types/k8s.js';
 
@@ -248,6 +250,7 @@ describe('Flujo updateTunnelAssignment (orden seguro) y deleteTunnel', () => {
     status: 'ready',
     statusLabel: '● Ready',
     namespaceNodeSelector: null,
+    extraNodeLabel: null,
     appPodNodes: [],
     crossNodeTrafficWarning: false,
     services: [],
@@ -362,6 +365,7 @@ describe('Auditoría de huérfanos', () => {
           status: 'pending',
           statusLabel: '⚠ Pending',
           namespaceNodeSelector: null,
+          extraNodeLabel: null,
           appPodNodes: [],
           crossNodeTrafficWarning: false,
           services: [],
@@ -374,5 +378,162 @@ describe('Auditoría de huérfanos', () => {
     assert.equal(report.orphanNamespaceLabels.length, 1);
     assert.equal(report.brokenDeployments.length, 1);
     assert.equal(report.totalIssues, 3);
+  });
+});
+
+describe('Afinidad por label de nodo y escalado rápido', () => {
+  const nodesWithFlotip: NodeAgentInfo[] = [
+    {
+      name: 'k3s-agent1',
+      roles: ['worker'],
+      isControlPlane: false,
+      ready: true,
+      unschedulable: false,
+      status: 'Ready',
+      version: 'v1.32.2+k3s1',
+      internalIp: '100.64.0.11',
+      osImage: 'Ubuntu',
+      labels: {
+        'kubernetes.io/hostname': 'k3s-agent1',
+        'tsure.io/cloudflared-abc123': 'true',
+      },
+      cloudflaredIds: ['abc123'],
+    },
+    {
+      name: 'k3s-agent2',
+      roles: ['worker'],
+      isControlPlane: false,
+      ready: true,
+      unschedulable: false,
+      status: 'Ready',
+      version: 'v1.32.2+k3s1',
+      internalIp: '100.64.0.12',
+      osImage: 'Ubuntu',
+      labels: {
+        'kubernetes.io/hostname': 'k3s-agent2',
+        flotip: 'true',
+      },
+      cloudflaredIds: [],
+    },
+  ];
+
+  const sampleTunnel: TunnelInfo = {
+    name: 'web',
+    resourceName: 'cloudflared-web',
+    namespace: 'mi-app',
+    tunnelId: 'abc123',
+    nodeLabelKey: 'tsure.io/cloudflared-abc123',
+    namespaceLabelKey: 'tsure.io/klared-abc123',
+    description: '',
+    image: 'cloudflare/cloudflared:2026.2.0',
+    imageVersion: '2026.2.0',
+    protocol: 'http2',
+    replicas: 1,
+    readyReplicas: 1,
+    availableReplicas: 1,
+    desiredReplicasWhenPaused: 1,
+    allowedAgents: ['k3s-agent1'],
+    annotatedAgents: ['k3s-agent1'],
+    runningAgents: ['k3s-agent1'],
+    pods: [],
+    status: 'ready',
+    statusLabel: '● Ready',
+    namespaceNodeSelector: null,
+    extraNodeLabel: null,
+    appPodNodes: [],
+    crossNodeTrafficWarning: false,
+    services: [],
+    hasMissingAllowedAgents: false,
+  };
+
+  it('aplica label de nodo (flotip=true) parcheando nodeAffinity y habilitando nodo compatible', async () => {
+    const calls: string[][] = [];
+    setKubectlExecutorForTesting(async (args) => {
+      calls.push(args);
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    });
+
+    const res = await updateTunnelNodeLabelAffinity({
+      tunnel: sampleTunnel,
+      selector: 'flotip=true',
+      allNodes: nodesWithFlotip,
+    });
+
+    assert.equal(res.appliedSelector, 'flotip=true');
+    assert.deepEqual(res.matchedAgents, ['k3s-agent2']);
+
+    // k3s-agent2 was labeled with tsure.io/cloudflared-abc123 so pod won't become Pending
+    assert.ok(
+      calls.some(
+        (a) =>
+          a[0] === 'label' &&
+          a[1] === 'node' &&
+          a[2] === 'k3s-agent2' &&
+          a[3] === 'tsure.io/cloudflared-abc123=true',
+      ),
+    );
+    const patchCall = calls.find((a) => a[0] === 'patch' && a[1] === 'deployment');
+    assert.ok(patchCall);
+    assert.ok(patchCall.join(' ').includes('"key":"flotip"'));
+    assert.ok(patchCall.join(' ').includes('"values":["true"]'));
+    assert.ok(calls.some((a) => a[0] === 'rollout' && a[1] === 'status'));
+  });
+
+  it('ejecuta rollout undo y revierte labels si falla el rollout al aplicar label', async () => {
+    const calls: string[][] = [];
+    setKubectlExecutorForTesting(async (args) => {
+      calls.push(args);
+      if (args[0] === 'rollout' && args[1] === 'status') {
+        throw new Error('timeout');
+      }
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    });
+
+    await assert.rejects(
+      () =>
+        updateTunnelNodeLabelAffinity({
+          tunnel: sampleTunnel,
+          selector: 'flotip=true',
+          allNodes: nodesWithFlotip,
+        }),
+      /timeout/,
+    );
+
+    assert.ok(calls.some((a) => a[0] === 'rollout' && a[1] === 'undo'));
+    assert.ok(
+      calls.some(
+        (a) =>
+          a[0] === 'label' &&
+          a[1] === 'node' &&
+          a[2] === 'k3s-agent2' &&
+          a[3] === 'tsure.io/cloudflared-abc123-',
+      ),
+    );
+  });
+
+  it('escala réplicas respetando el máximo de agentes permitidos', async () => {
+    const calls: string[][] = [];
+    setKubectlExecutorForTesting(async (args) => {
+      calls.push(args);
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    });
+
+    const twoAgentTunnel: TunnelInfo = {
+      ...sampleTunnel,
+      allowedAgents: ['k3s-agent1', 'k3s-agent2'],
+    };
+
+    const scaled = await scaleTunnelReplicas({
+      tunnel: twoAgentTunnel,
+      newReplicas: 2,
+    });
+    assert.equal(scaled, 2);
+    assert.ok(calls.some((a) => a[0] === 'scale' && a.includes('--replicas=2')));
+    assert.ok(calls.some((a) => a[0] === 'rollout' && a[1] === 'status'));
+
+    await assert.rejects(
+      () => scaleTunnelReplicas({ tunnel: twoAgentTunnel, newReplicas: 3 }),
+      /entre 1 y 2/,
+    );
   });
 });

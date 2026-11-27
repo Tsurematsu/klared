@@ -1,4 +1,9 @@
-import type { AgentEligibility, NodeAgentInfo, TunnelProtocol } from '../types/k8s.js';
+import type {
+  AgentEligibility,
+  NodeAgentInfo,
+  NodeLabelOption,
+  TunnelProtocol,
+} from '../types/k8s.js';
 
 export const TSURE_PREFIX = 'tsure.io/';
 export const CLOUDFLARED_RESOURCE_PREFIX = 'cloudflared-';
@@ -10,6 +15,7 @@ export const TUNNEL_ID_ANNOTATION = 'tsure.io/tunnel-id';
 export const AGENTS_ANNOTATION = 'tsure.io/agents';
 export const DESCRIPTION_ANNOTATION = 'tsure.io/description';
 export const DESIRED_REPLICAS_ANNOTATION = 'tsure.io/desired-replicas';
+export const NODE_LABEL_AFFINITY_ANNOTATION = 'tsure.io/node-label-affinity';
 
 export const K8S_NODE_SELECTOR_ANNOTATION =
   'scheduler.alpha.kubernetes.io/node-selector';
@@ -483,4 +489,179 @@ export function summarizeCloudflaredLogDiagnostic(rawLogs: string): string {
   const errorLines = lines.filter((l) => /\b(ERR|FTL)\b|error=/i.test(l));
   const picked = (errorLines.length > 0 ? errorLines : lines).slice(-2);
   return ` | Logs: ${picked.join(' / ')}`;
+}
+
+const SYSTEM_NODE_LABEL_PREFIXES = [
+  'kubernetes.io/',
+  'beta.kubernetes.io/',
+  'node.kubernetes.io/',
+  'k3s.io/',
+  'node-role.kubernetes.io/',
+];
+
+export function isSystemNodeLabelKey(key: string): boolean {
+  return SYSTEM_NODE_LABEL_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
+export interface ParsedSingleNodeLabel {
+  valid: boolean;
+  selector: string | null;
+  key: string | null;
+  value: string | null;
+  error?: string;
+}
+
+export function parseSingleNodeLabelSelector(
+  raw: string | null | undefined,
+): ParsedSingleNodeLabel {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) {
+    return { valid: true, selector: null, key: null, value: null };
+  }
+
+  const eqIdx = trimmed.indexOf('=');
+  if (eqIdx === -1) {
+    if (!isValidLabelKey(trimmed)) {
+      return {
+        valid: false,
+        selector: null,
+        key: null,
+        value: null,
+        error: `Clave de label inválida: "${trimmed}".`,
+      };
+    }
+    return { valid: true, selector: trimmed, key: trimmed, value: null };
+  }
+
+  const key = trimmed.slice(0, eqIdx).trim();
+  const value = trimmed.slice(eqIdx + 1).trim();
+  if (!isValidLabelKey(key)) {
+    return {
+      valid: false,
+      selector: null,
+      key: null,
+      value: null,
+      error: `Clave de label inválida: "${key}".`,
+    };
+  }
+  if (value.length > 63 || !LABEL_VALUE_REGEX.test(value)) {
+    return {
+      valid: false,
+      selector: null,
+      key: null,
+      value: null,
+      error: `Valor de label inválido: "${value}".`,
+    };
+  }
+  const selector = value === '' ? key : `${key}=${value}`;
+  return {
+    valid: true,
+    selector,
+    key,
+    value: value === '' ? null : value,
+  };
+}
+
+export function formatCompactNodeLabel(
+  selector: string | null | undefined,
+): string {
+  const parsed = parseSingleNodeLabelSelector(selector);
+  if (!parsed.valid || !parsed.key) {
+    return selector?.trim() || 'ninguno';
+  }
+  const slashIdx = parsed.key.lastIndexOf('/');
+  const baseKey = slashIdx >= 0 ? parsed.key.slice(slashIdx + 1) : parsed.key;
+  if (!parsed.value || parsed.value.toLowerCase() === 'true') {
+    return baseKey;
+  }
+  return `${baseKey}=${parsed.value}`;
+}
+
+export function matchNodesForLabelAffinity(
+  selector: string | null | undefined,
+  nodes: NodeAgentInfo[],
+): NodeAgentInfo[] {
+  if (!selector) return nodes;
+  const parsed = parseSingleNodeLabelSelector(selector);
+  if (!parsed.valid || !parsed.key) return [];
+  const key = parsed.key;
+  if (parsed.value === null) {
+    return nodes.filter((node) => node.labels[key] !== undefined);
+  }
+  return nodes.filter((node) => node.labels[key] === parsed.value);
+}
+
+/**
+ * Discovers existing node labels across worker agents (excluding control-plane
+ * and internal tsure.io/cloudflared-* per-tunnel labels).
+ */
+export function collectClusterNodeLabels(
+  nodes: NodeAgentInfo[],
+): NodeLabelOption[] {
+  const workerAgents = nodes.filter((n) => !n.isControlPlane);
+  const bySelector = new Map<
+    string,
+    {
+      key: string;
+      value: string;
+      selector: string;
+      nodes: Set<string>;
+      readyNodes: Set<string>;
+      isSystem: boolean;
+    }
+  >();
+
+  for (const agent of workerAgents) {
+    for (const [key, value] of Object.entries(agent.labels)) {
+      if (key.startsWith(CLOUDFLARED_NODE_LABEL_PREFIX)) continue;
+      if (key === CLOUDFLARED_MANAGED_LABEL_KEY) continue;
+
+      const selector = value === '' ? key : `${key}=${value}`;
+      let entry = bySelector.get(selector);
+      if (!entry) {
+        entry = {
+          key,
+          value,
+          selector,
+          nodes: new Set(),
+          readyNodes: new Set(),
+          isSystem: isSystemNodeLabelKey(key),
+        };
+        bySelector.set(selector, entry);
+      }
+      entry.nodes.add(agent.name);
+      if (agent.ready && !agent.unschedulable) {
+        entry.readyNodes.add(agent.name);
+      }
+    }
+  }
+
+  const rawList = Array.from(bySelector.values());
+  const shortCounts = new Map<string, number>();
+  for (const item of rawList) {
+    const short = formatCompactNodeLabel(item.selector);
+    shortCounts.set(short, (shortCounts.get(short) ?? 0) + 1);
+  }
+
+  const result: NodeLabelOption[] = rawList.map((item) => {
+    const compact = formatCompactNodeLabel(item.selector);
+    const shortLabel =
+      (shortCounts.get(compact) ?? 0) > 1 ? item.selector : compact;
+    return {
+      key: item.key,
+      value: item.value,
+      selector: item.selector,
+      shortLabel,
+      nodes: Array.from(item.nodes).sort(),
+      readyNodes: Array.from(item.readyNodes).sort(),
+      isSystem: item.isSystem,
+    };
+  });
+
+  result.sort((a, b) => {
+    if (a.isSystem !== b.isSystem) return a.isSystem ? 1 : -1;
+    return a.selector.localeCompare(b.selector);
+  });
+
+  return result;
 }

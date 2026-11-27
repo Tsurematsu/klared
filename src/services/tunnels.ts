@@ -28,6 +28,9 @@ import {
   extractTunnelLogicalName,
   extractTunnelProtocol,
   extractTunnelToken,
+  matchNodesForLabelAffinity,
+  NODE_LABEL_AFFINITY_ANNOTATION,
+  parseSingleNodeLabelSelector,
   summarizeCloudflaredLogDiagnostic,
   TUNNEL_ID_ANNOTATION,
   validateImageVersion,
@@ -59,6 +62,7 @@ interface K8sDeploymentItem {
                 matchExpressions?: Array<{
                   key?: string;
                   operator?: string;
+                  values?: string[];
                 }>;
               }>;
             };
@@ -155,6 +159,32 @@ function extractTunnelIdFromDeployment(dep: K8sDeploymentItem): string {
     }
   }
   return 'sin-id';
+}
+
+function extractExtraNodeLabelFromDeployment(
+  dep: K8sDeploymentItem,
+  nodeLabelKey: string,
+): string | null {
+  const terms =
+    dep.spec?.template?.spec?.affinity?.nodeAffinity
+      ?.requiredDuringSchedulingIgnoredDuringExecution?.nodeSelectorTerms ?? [];
+  for (const term of terms) {
+    for (const expr of term.matchExpressions ?? []) {
+      const key = expr.key?.trim() ?? '';
+      if (!key || key === nodeLabelKey) continue;
+      if (expr.operator === 'In' && expr.values && expr.values.length > 0) {
+        const val = expr.values[0] ?? '';
+        return val === '' ? key : `${key}=${val}`;
+      }
+      if (expr.operator === 'Exists') {
+        return key;
+      }
+    }
+  }
+
+  const fromAnnotation =
+    dep.metadata?.annotations?.[NODE_LABEL_AFFINITY_ANNOTATION]?.trim() || null;
+  return fromAnnotation;
 }
 
 function buildSuggestedUrls(serviceName: string, ports: ServiceEndpointInfo['ports']): string[] {
@@ -314,6 +344,7 @@ export async function getClusterSnapshot(): Promise<ClusterSnapshot> {
     const annotations = dep.metadata?.annotations ?? {};
     const tunnelId = extractTunnelIdFromDeployment(dep);
     const nodeLabelKey = buildNodeLabelKey(tunnelId);
+    const extraNodeLabel = extractExtraNodeLabelFromDeployment(dep, nodeLabelKey);
     const namespaceLabelKey = buildNamespaceLabelKey(tunnelId);
     const description = annotations[DESCRIPTION_ANNOTATION] ?? '';
 
@@ -442,6 +473,7 @@ export async function getClusterSnapshot(): Promise<ClusterSnapshot> {
       status,
       statusLabel,
       namespaceNodeSelector: nsMeta?.nodeSelector ?? null,
+      extraNodeLabel,
       appPodNodes,
       crossNodeTrafficWarning,
       services: servicesByNs.get(namespace) ?? [],
@@ -1424,4 +1456,266 @@ export async function cleanupOrphanLabels(params: {
   }
 
   return { removedNodes, removedNamespaces };
+}
+
+/**
+ * Scales a tunnel Deployment directly to the target replica count (1..allowedAgents)
+ * and waits for rollout status.
+ */
+export async function scaleTunnelReplicas(params: {
+  tunnel: TunnelInfo;
+  newReplicas: number;
+}): Promise<number> {
+  const { tunnel, newReplicas } = params;
+  if (tunnel.allowedAgents.length === 0) {
+    throw new Error(
+      'El túnel no tiene agentes permitidos. Asigna agentes antes de escalar.',
+    );
+  }
+  const maxReplicas = Math.max(1, tunnel.allowedAgents.length);
+  if (!Number.isInteger(newReplicas) || newReplicas < 1 || newReplicas > maxReplicas) {
+    throw new Error(
+      `Las réplicas deben estar entre 1 y ${maxReplicas} (agentes permitidos).`,
+    );
+  }
+
+  await runKubectl(
+    [
+      'scale',
+      `deployment/${tunnel.resourceName}`,
+      '-n',
+      tunnel.namespace,
+      `--replicas=${newReplicas}`,
+    ],
+    { timeoutMs: 15_000 },
+  );
+
+  await runKubectl(
+    [
+      'rollout',
+      'status',
+      `deployment/${tunnel.resourceName}`,
+      '-n',
+      tunnel.namespace,
+      '--timeout=90s',
+    ],
+    { timeoutMs: 95_000 },
+  );
+
+  return newReplicas;
+}
+
+/**
+ * Applies or clears an additional node label affinity expression on the tunnel Deployment
+ * (e.g. "flotip=true") while preserving tsure.io/cloudflared-<id> and never modifying
+ * external node labels. Uses zero-downtime rollout with rollback on failure.
+ */
+export async function updateTunnelNodeLabelAffinity(params: {
+  tunnel: TunnelInfo;
+  selector: string | null;
+  allNodes: NodeAgentInfo[];
+  onProgress?: (steps: OperationStepLog[]) => void;
+}): Promise<{ appliedSelector: string | null; matchedAgents: string[] }> {
+  const { tunnel, allNodes, onProgress } = params;
+  const parsed = parseSingleNodeLabelSelector(params.selector);
+  if (!parsed.valid) {
+    throw new Error(parsed.error ?? 'Label de nodo inválido.');
+  }
+
+  const targetSelector = parsed.selector;
+  const steps: OperationStepLog[] = [
+    { label: 'Validar nodos compatibles con el label', status: 'pending' },
+    { label: 'Actualizar nodeAffinity en el Deployment', status: 'pending' },
+    { label: 'Esperar rollout sin corte (/ready)', status: 'pending' },
+  ];
+
+  const emit = () => onProgress?.(steps.map((s) => ({ ...s })));
+  const mark = (
+    idx: number,
+    status: OperationStepLog['status'],
+    detail?: string,
+  ) => {
+    const step = steps[idx];
+    if (step) {
+      step.status = status;
+      if (detail !== undefined) step.detail = detail;
+    }
+    emit();
+  };
+
+  const addedNodes: string[] = [];
+  let matchedAgentNames: string[] = [];
+
+  try {
+    mark(0, 'running');
+    const eligibility = computeAgentEligibility(
+      allNodes,
+      tunnel.namespaceNodeSelector,
+    );
+    const eligibleNodes = eligibility
+      .filter((e) => e.eligible)
+      .map((e) => e.agent);
+
+    if (targetSelector && parsed.key) {
+      const matchingEligible = matchNodesForLabelAffinity(
+        targetSelector,
+        eligibleNodes,
+      );
+      if (matchingEligible.length === 0) {
+        throw new Error(
+          `Ningún agente Ready compatible con "${tunnel.namespace}" tiene el label "${targetSelector}".`,
+        );
+      }
+      matchedAgentNames = matchingEligible.map((n) => n.name).sort();
+
+      // Ensure at least one matching eligible node also has tsure.io/cloudflared-<id>
+      // so the pod will never become Pending due to an empty intersection.
+      const hasOverlap = matchingEligible.some((n) =>
+        tunnel.allowedAgents.includes(n.name),
+      );
+      if (!hasOverlap) {
+        for (const node of matchingEligible) {
+          await runKubectl(
+            ['label', 'node', node.name, `${tunnel.nodeLabelKey}=true`, '--overwrite'],
+            { timeoutMs: 12_000 },
+          );
+          addedNodes.push(node.name);
+        }
+      }
+      mark(
+        0,
+        'ok',
+        `${targetSelector} → ${matchedAgentNames.join(', ')}${addedNodes.length > 0 ? ' (+habilitados)' : ''}`,
+      );
+    } else {
+      matchedAgentNames = [...tunnel.allowedAgents];
+      mark(0, 'ok', 'Sin label adicional (solo agentes permitidos)');
+    }
+
+    // Build matchExpressions cleanly
+    mark(1, 'running');
+    const matchExpressions: Array<
+      | { key: string; operator: 'Exists' }
+      | { key: string; operator: 'In'; values: string[] }
+    > = [{ key: tunnel.nodeLabelKey, operator: 'Exists' }];
+
+    if (targetSelector && parsed.key) {
+      if (parsed.value !== null) {
+        matchExpressions.push({
+          key: parsed.key,
+          operator: 'In',
+          values: [parsed.value],
+        });
+      } else {
+        matchExpressions.push({
+          key: parsed.key,
+          operator: 'Exists',
+        });
+      }
+    }
+
+    const patchOps = [
+      {
+        op: 'replace',
+        path: '/spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms/0/matchExpressions',
+        value: matchExpressions,
+      },
+    ];
+
+    await runKubectl(
+      [
+        'patch',
+        'deployment',
+        tunnel.resourceName,
+        '-n',
+        tunnel.namespace,
+        '--type=json',
+        '-p',
+        JSON.stringify(patchOps),
+      ],
+      { timeoutMs: 15_000 },
+    );
+    mark(
+      1,
+      'ok',
+      targetSelector ? `Afinidad aplicada: ${targetSelector}` : 'Afinidad adicional eliminada',
+    );
+
+    mark(2, 'running');
+    if (tunnel.replicas > 0) {
+      try {
+        await runKubectl(
+          [
+            'rollout',
+            'status',
+            `deployment/${tunnel.resourceName}`,
+            '-n',
+            tunnel.namespace,
+            '--timeout=90s',
+          ],
+          {
+            timeoutMs: 95_000,
+            onStdout: (chunk) => {
+              const line = chunk.trim().split('\n').pop();
+              if (line) mark(2, 'running', line);
+            },
+          },
+        );
+        mark(2, 'ok', 'Túnel reprogramado y Ready');
+      } catch (rolloutErr) {
+        await runKubectl(
+          ['rollout', 'undo', `deployment/${tunnel.resourceName}`, '-n', tunnel.namespace],
+          { timeoutMs: 20_000 },
+        ).catch(() => {});
+        for (const nodeName of addedNodes) {
+          await runKubectl(['label', 'node', nodeName, `${tunnel.nodeLabelKey}-`], {
+            timeoutMs: 12_000,
+          }).catch(() => {});
+        }
+        mark(2, 'error', 'Rollout expirado/fallido — se ejecutó rollout undo');
+        throw rolloutErr;
+      }
+    } else {
+      mark(2, 'ok', 'Túnel pausado (se aplicará al reactivar)');
+    }
+
+    // Sync annotations (audit mirror)
+    const annotateArgs = [
+      'annotate',
+      `deployment/${tunnel.resourceName}`,
+      '-n',
+      tunnel.namespace,
+      targetSelector
+        ? `${NODE_LABEL_AFFINITY_ANNOTATION}=${targetSelector}`
+        : `${NODE_LABEL_AFFINITY_ANNOTATION}-`,
+      '--overwrite',
+    ];
+    await runKubectl(annotateArgs, { timeoutMs: 12_000 }).catch(() => {});
+
+    if (addedNodes.length > 0) {
+      const updatedAgents = [...new Set([...tunnel.allowedAgents, ...addedNodes])].sort();
+      await runKubectl(
+        [
+          'annotate',
+          `deployment/${tunnel.resourceName}`,
+          '-n',
+          tunnel.namespace,
+          `${AGENTS_ANNOTATION}=${updatedAgents.join(',')}`,
+          '--overwrite',
+        ],
+        { timeoutMs: 12_000 },
+      ).catch(() => {});
+    }
+
+    return {
+      appliedSelector: targetSelector,
+      matchedAgents: matchedAgentNames,
+    };
+  } catch (err) {
+    const runningIdx = steps.findIndex((s) => s.status === 'running');
+    if (runningIdx >= 0) {
+      mark(runningIdx, 'error', err instanceof Error ? err.message : String(err));
+    }
+    throw err;
+  }
 }

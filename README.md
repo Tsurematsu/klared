@@ -178,21 +178,32 @@ npm run build:sea
 
 ## Atajos de teclado
 
+### Menú principal (Dashboard)
+
 | Tecla | Acción |
 | :---: | :--- |
-| `↑` / `↓` (o `j` / `k`) | Navegar por la lista de túneles |
+| `↑` / `↓` (o `j` / `k`) | Navegar por la lista de túneles (en la tabla) o ítems del panel rápido |
+| `Tab` / `Shift+Tab` | Alternar foco entre la tabla de túneles y el panel rápido (`Agentes`, `Mover`, `Réplicas`, `Label`) |
+| `←` / `→` | Ajustar valor en el panel rápido (`Mover`, `Réplicas`, `Label`) |
+| `Enter` | Abrir Inspección (desde la tabla) o abrir/aplicar el control enfocado (desde el panel) |
 | `n` | Instalar un nuevo túnel (`Secret` + `Deployment` con rollback) |
-| `i` / `Enter` | Inspeccionar pods, nodo, `/ready`, logs recientes, agentes permitidos y Services |
-| `e` | Editar asignación de agentes y réplicas sin corte |
-| `m` | Mover ya: forzar traslado sin corte hacia otro agente permitido `Ready` |
+| `i` | Abrir el menú de Inspección del túnel seleccionado |
+| `l` | Ver la lista completa de labels de nodos del clúster y aplicarlos al túnel |
+| `u` | Refrescar manualmente (además del refresco automático cada 5 s) |
+| `Q` / `Esc` | Volver a la tabla (desde el panel) o salir y restaurar la terminal |
+
+### Menú de Inspección (`i` / `Enter`)
+
+| Tecla | Acción |
+| :---: | :--- |
 | `r` | Reiniciar el Deployment (`rollout restart` con `rollout undo` si expira) |
 | `p` | Pausar (escalar a `0`) y reactivar conservando Secret y labels |
 | `t` | Rotar token (actualizar Secret por `stdin` y reiniciar) |
-| `c` | Copiar URL interna sugerida (`http://<service>:<port>`) al portapapeles |
 | `a` | Ver agentes k3s y ejecutar auditoría manual de huérfanos (`LIMPIAR`) |
+| `c` | Copiar URL interna sugerida (`http://<service>:<port>`) al portapapeles |
 | `x` | Eliminar túnel y limpiar labels con confirmación por nombre exacto |
-| `u` | Refrescar manualmente (además del refresco automático cada 5 s) |
-| `Q` / `Esc` | Salir y restaurar la terminal |
+| `u` | Refrescar estado y logs recientes del contenedor |
+| `Esc` / `q` | Volver al menú principal |
 
 ---
 
