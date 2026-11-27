@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>klared — Gestor TUI de Túneles cloudflared para k3s (tsure.io/*)</title>
+    <meta
+      name="description"
+      content="Herramienta TUI local dependiente de kubectl para instalar y administrar túneles Cloudflare (cloudflared) en k3s con afinidad por agente, traslado sin corte y contrato tsure.io/*."
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="navbar">
+      <div class="container navbar-inner">
+        <a class="brand" href="#inicio">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <span>klared</span>
+          <span class="brand-tag">tsure.io/*</span>
+        </a>
+        <nav class="nav-links" aria-label="Navegación principal">
+          <a href="#caracteristicas">Características</a>
+          <a href="#recorrido">Recorrido</a>
+          <a href="#contrato">Contrato y Afinidad</a>
+          <a href="#instalacion">Instalación</a>
+          <a href="#atajos">Atajos</a>
+        </nav>
+        <a
+          class="btn btn-secondary btn-sm"
+          href="https://github.com/Tsurematsu/klared"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          GitHub ↗
+        </a>
+      </div>
+    </header>
+
+    <main id="inicio">
+      <!-- Hero -->
+      <section class="hero">
+        <div class="container">
+          <div class="eyebrow">● kubectl local · k3s agents · cloudflared · React 19 + Ink 8</div>
+          <h1>
+            Instala y mueve túneles <span class="gradient-text">cloudflared</span> en k3s sin cortar el tráfico.
+          </h1>
+          <p class="hero-sub">
+            <strong>klared</strong> es una interfaz TUI ligera para administrar túneles Cloudflare
+            (<em>remotely-managed</em> por token) en tu clúster k3s: asignación selectiva por agente,
+            failover rápido, token seguro vía <code>stdin</code> y compatibilidad nativa con
+            <code>k3access</code> bajo el contrato <code>tsure.io/*</code>.
+          </p>
+
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="#instalacion">Instalar vía curl</a>
+            <a class="btn btn-secondary" href="#recorrido">Ver capturas en vivo</a>
+          </div>
+
+          <div class="hero-pills">
+            <span class="pill">Pre-Flight + --check</span>
+            <span class="pill">Token solo por stdin</span>
+            <span class="pill">Traslado sin corte (maxUnavailable: 0)</span>
+            <span class="pill">Failover ~30s</span>
+            <span class="pill">Compatible con k3access</span>
+          </div>
+
+          <div class="terminal-window">
+            <div class="terminal-bar">
+              <div class="terminal-dots" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </div>
+              <div class="terminal-title">klared — Dashboard en vivo (túneles cloudflared en k3s)</div>
+              <div class="terminal-zoom-hint">Clic para ampliar ⤢</div>
+            </div>
+            <div class="terminal-body" id="hero-zoom-trigger">
+              <img
+                src="./images/dashboard.png"
+                alt="Dashboard principal de klared mostrando túneles cloudflared, nodos permitidos y estado Ready"
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Características -->
+      <section class="section" id="caracteristicas">
+        <div class="container">
+          <div class="section-header">
+            <div class="section-kicker">Arquitectura</div>
+            <h2>Consumo mínimo en el clúster, control total desde tu terminal</h2>
+            <p>
+              Sin operadores, sin CRDs ni Ingress adicionales: cada túnel es solo un <code>Secret</code> y un
+              <code>Deployment</code> bien afinado (~20–50 MB de RAM por réplica).
+            </p>
+          </div>
+
+          <div class="features-grid">
+            <article class="card">
+              <div class="card-icon">✓</div>
+              <h3>Pre-Flight y modo <code>--check</code></h3>
+              <p>
+                Valida <code>kubectl</code>, contexto activo, agentes worker <code>Ready</code> (excluyendo
+                <code>control-plane</code>), permisos RBAC y lectura de namespaces antes de abrir la TUI.
+              </p>
+            </article>
+
+            <article class="card">
+              <div class="card-icon green">⇄</div>
+              <h3>Traslado sin cortes y failover 30s</h3>
+              <p>
+                Combina <code>maxUnavailable: 0</code>, <code>readinessProbe</code> en <code>/ready:2000</code>,
+                <code>topologySpreadConstraints</code> y <code>tolerations</code> de 30 s. Si un rollout expira,
+                revierte con <code>rollout undo</code>.
+              </p>
+            </article>
+
+            <article class="card">
+              <div class="card-icon red">🛡</div>
+              <h3>Token seguro por <code>stdin</code></h3>
+              <p>
+                El token nunca pasa por argumentos de CLI ni aparece en <code>ps</code> o logs: se inyecta por
+                <code>stdin</code> a <code>kubectl apply -f -</code> y se extrae automáticamente si pegas el
+                comando completo de Zero Trust.
+              </p>
+            </article>
+
+            <article class="card">
+              <div class="card-icon magenta">⚡</div>
+              <h3>Contrato <code>tsure.io/*</code> + <code>k3access</code></h3>
+              <p>
+                Lee en solo lectura <code>tsure.io/node-selector</code> del namespace, calcula la intersección de
+                agentes válidos y marca el namespace con <code>tsure.io/klared-&lt;id&gt;=true</code>.
+              </p>
+            </article>
+
+            <article class="card">
+              <div class="card-icon amber">↺</div>
+              <h3>Rollback y auditoría de huérfanos</h3>
+              <p>
+                Si una instalación falla a mitad, limpia Deployment, Secret y labels automáticamente. Además audita
+                labels huérfanos en nodos y namespaces con limpieza manual confirmada (<code>LIMPIAR</code>).
+              </p>
+            </article>
+
+            <article class="card">
+              <div class="card-icon">⬡</div>
+              <h3>Binario autónomo + auto-update</h3>
+              <p>
+                Compilado con <code>esbuild</code> + <code>node --build-sea</code> para Linux x64 y Windows x64.
+                El instalador <code>curl</code> detecta la última release, valida <strong>SHA-256</strong> y
+                actualiza en sitio.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- Recorrido visual interactivo -->
+      <section class="section" id="recorrido">
+        <div class="container">
+          <div class="section-header">
+            <div class="section-kicker">Recorrido interactivo</div>
+            <h2>La TUI de <code>klared</code> en acción</h2>
+            <p>
+              Haz clic en cualquier captura para ampliarla en pantalla completa y navegar con
+              <code>←</code> / <code>→</code>.
+            </p>
+          </div>
+
+          <div class="gallery-tabs" id="gallery-tabs" role="tablist" aria-label="Pantallas de klared"></div>
+
+          <div class="gallery-stage">
+            <div class="terminal-window">
+              <div class="terminal-bar">
+                <div class="terminal-dots" aria-hidden="true">
+                  <span></span><span></span><span></span>
+                </div>
+                <div class="terminal-title" id="stage-terminal-title">klared</div>
+                <div class="terminal-zoom-hint">Clic para ampliar ⤢</div>
+              </div>
+              <div class="terminal-body" id="stage-zoom-trigger">
+                <img id="stage-img" src="./images/dashboard.png" alt="Captura de klared" />
+              </div>
+            </div>
+
+            <aside class="gallery-info">
+              <span class="gallery-badge" id="stage-badge"></span>
+              <h3 id="stage-title"></h3>
+              <p id="stage-desc"></p>
+              <ul class="gallery-points" id="stage-points"></ul>
+            </aside>
+          </div>
+
+          <div class="thumb-strip" id="thumb-strip" aria-label="Miniaturas de capturas"></div>
+        </div>
+      </section>
+
+      <!-- Contrato y Simulador de Afinidad -->
+      <section class="section" id="contrato">
+        <div class="container">
+          <div class="section-header">
+            <div class="section-kicker">Contrato tsure.io/* &amp; Afinidad</div>
+            <h2>Labels exclusivos por túnel e intersección con <code>k3access</code></h2>
+            <p>
+              Cada túnel recibe un ID hex único (<code>a3f9c2</code>) que aísla sus nodos permitidos y su marca en el
+              namespace, permitiendo incluso múltiples túneles en el mismo namespace sin interferencias.
+            </p>
+          </div>
+
+          <div class="two-col">
+            <div>
+              <div class="code-panel">
+                <div class="code-panel-head">
+                  <span>klared-contract.yaml</span>
+                  <span>Node · Namespace · Deployment</span>
+                </div>
+                <pre><code><span class="tok-comment"># 1. Nodos permitidos (fuente de verdad)</span>
+<span class="tok-key">tsure.io/cloudflared-a3f9c2</span>: <span class="tok-val">"true"</span>
+
+<span class="tok-comment"># 2. Namespace (visible en HERRAMIENTAS de k3access)</span>
+<span class="tok-warn">tsure.io/klared-a3f9c2</span>: <span class="tok-val">"true"</span>
+
+<span class="tok-comment"># 3. Secret y Deployment propios de klared</span>
+<span class="tok-key">metadata</span>:
+  <span class="tok-key">name</span>: <span class="tok-val">cloudflared-mi-app</span>
+  <span class="tok-key">labels</span>:
+    <span class="tok-key">tsure.io/cloudflared</span>: <span class="tok-val">"true"</span>
+  <span class="tok-key">annotations</span>:
+    <span class="tok-key">tsure.io/tunnel-id</span>: <span class="tok-val">"a3f9c2"</span>
+    <span class="tok-key">tsure.io/agents</span>: <span class="tok-val">"k3s-agent1,k3s-agent2"</span>
+<span class="tok-key">spec</span>:
+  <span class="tok-key">strategy.rollingUpdate.maxUnavailable</span>: <span class="tok-val">0</span>
+  <span class="tok-key">tolerations[].tolerationSeconds</span>: <span class="tok-val">30</span></code></pre>
+              </div>
+
+              <div class="note-box">
+                <strong>Orden seguro al cambiar agentes:</strong> <code>klared</code> etiqueta primero los agentes
+                nuevos, ejecuta <code>rollout restart</code> + espera <code>/ready</code> para evacuar sin corte los
+                nodos descartados, y solo al final retira el label antiguo y actualiza la annotation espejo.
+              </div>
+            </div>
+
+            <div class="sim-card">
+              <h3>Simulador de Intersección de Agentes</h3>
+              <p>
+                Comprueba qué agentes habilita <code>klared</code> combinando el estado de tus nodos con la afinidad
+                de solo lectura definida en <code>k3access</code>:
+              </p>
+
+              <div class="sim-toggles">
+                <label class="sim-toggle">
+                  <div class="sim-toggle-text">
+                    <strong>k3s-agent1 disponible (Ready)</strong>
+                    <span>kubernetes.io/hostname=k3s-agent1</span>
+                  </div>
+                  <input type="checkbox" id="sim-agent1" checked />
+                </label>
+
+                <label class="sim-toggle">
+                  <div class="sim-toggle-text">
+                    <strong>k3s-agent2 disponible (Ready)</strong>
+                    <span>kubernetes.io/hostname=k3s-agent2</span>
+                  </div>
+                  <input type="checkbox" id="sim-agent2" checked />
+                </label>
+
+                <label class="sim-toggle">
+                  <div class="sim-toggle-text">
+                    <strong>Afinidad del namespace (k3access)</strong>
+                    <span>tsure.io/node-selector (solo lectura)</span>
+                  </div>
+                  <select id="sim-ns-selector" class="sim-select" aria-label="Afinidad del namespace">
+                    <option value="any">Sin restricción</option>
+                    <option value="k3s-agent1">Solo k3s-agent1</option>
+                    <option value="k3s-agent2">Solo k3s-agent2</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="sim-result" id="sim-result" aria-live="polite"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Instalación -->
+      <section class="section" id="instalacion">
+        <div class="container">
+          <div class="section-header">
+            <div class="section-kicker">Inicio rápido</div>
+            <h2>Instala o actualiza vía <code>curl</code> en segundos</h2>
+            <p>
+              El binario autocontenido no requiere Node.js: solo necesitas <code>kubectl</code> configurado en tu
+              equipo. El script consulta siempre la <strong>última versión publicada</strong> en GitHub Releases,
+              verifica su <strong>SHA-256</strong> y <strong>actualiza automáticamente</strong> si vuelves a
+              ejecutarlo.
+            </p>
+          </div>
+
+          <div class="install-tabs" role="tablist" aria-label="Método de instalación">
+            <button
+              class="gallery-tab active"
+              type="button"
+              role="tab"
+              aria-selected="true"
+              data-install-tab="linux"
+            >
+              Linux (x64) · curl
+            </button>
+            <button
+              class="gallery-tab"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              data-install-tab="windows"
+            >
+              Windows (x64) · PowerShell
+            </button>
+            <button
+              class="gallery-tab"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              data-install-tab="source"
+            >
+              Desde código fuente (Node 20+)
+            </button>
+          </div>
+
+          <div class="install-panel active" data-install-panel="linux">
+            <div class="commands-grid">
+              <div class="code-panel">
+                <div class="code-panel-head">
+                  <span>Instalar o actualizar a la última versión (Linux x64)</span>
+                  <button class="copy-btn" type="button" data-copy-target="cmd-linux-curl">Copiar</button>
+                </div>
+                <pre id="cmd-linux-curl"><code>curl -fsSL https://raw.githubusercontent.com/Tsurematsu/klared/main/scripts/install.sh | bash</code></pre>
+              </div>
+
+              <div class="code-panel">
+                <div class="code-panel-head">
+                  <span>Verificar pre-flight, abrir TUI o forzar actualización</span>
+                  <button class="copy-btn" type="button" data-copy-target="cmd-linux-run">Copiar</button>
+                </div>
+                <pre id="cmd-linux-run"><code># Validar kubectl, agentes y RBAC sin abrir la TUI
+klared --check
+
+# Abrir el dashboard interactivo
+klared
+
+# Actualizar en el futuro (mismo comando) o forzar reinstalación
+curl -fsSL https://tsurematsu.github.io/klared/install.sh | bash -s -- --force</code></pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="install-panel" data-install-panel="windows">
+            <div class="commands-grid">
+              <div class="code-panel">
+                <div class="code-panel-head">
+                  <span>Instalar o actualizar vía curl.exe (PowerShell)</span>
+                  <button class="copy-btn" type="button" data-copy-target="cmd-win-curl">Copiar</button>
+                </div>
+                <pre id="cmd-win-curl"><code>curl.exe -fsSL https://raw.githubusercontent.com/Tsurematsu/klared/main/scripts/install.ps1 -o "$env:TEMP\klared-install.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\klared-install.ps1"</code></pre>
+              </div>
+
+              <div class="code-panel">
+                <div class="code-panel-head">
+                  <span>Alternativa en una sola línea (PowerShell irm)</span>
+                  <button class="copy-btn" type="button" data-copy-target="cmd-win-irm">Copiar</button>
+                </div>
+                <pre id="cmd-win-irm"><code>irm https://raw.githubusercontent.com/Tsurematsu/klared/main/scripts/install.ps1 | iex
+
+# Después abre una nueva terminal y ejecuta:
+klared --check
+klared</code></pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="install-panel" data-install-panel="source">
+            <div class="commands-grid">
+              <div class="code-panel">
+                <div class="code-panel-head">
+                  <span>1. Clonar, compilar y abrir la TUI</span>
+                  <button class="copy-btn" type="button" data-copy-target="cmd-install">Copiar</button>
+                </div>
+                <pre id="cmd-install"><code>git clone https://github.com/Tsurematsu/klared.git
+cd klared
+npm install
+npm run build
+npm start</code></pre>
+              </div>
+
+              <div class="code-panel">
+                <div class="code-panel-head">
+                  <span>2. Pruebas y empaquetado SEA (Linux + Windows)</span>
+                  <button class="copy-btn" type="button" data-copy-target="cmd-tools">Copiar</button>
+                </div>
+                <pre id="cmd-tools"><code># Chequeo Pre-Flight + resumen sin abrir TUI
+node dist/index.js --check
+
+# Typecheck y pruebas unitarias (19 tests)
+npm run typecheck && npm test
+
+# Generar ejecutables autocontenidos en build/
+npm run build:sea</code></pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="release-bar">
+            <div>
+              <strong>Descarga directa desde GitHub Releases (latest):</strong>
+              <span>Binarios autocontenidos verificados con SHA-256.</span>
+            </div>
+            <div class="release-links">
+              <a
+                class="btn btn-secondary btn-sm"
+                href="https://github.com/Tsurematsu/klared/releases/latest/download/klared-linux-x64"
+              >
+                Linux x64 ↓
+              </a>
+              <a
+                class="btn btn-secondary btn-sm"
+                href="https://github.com/Tsurematsu/klared/releases/latest/download/klared-win-x64.exe"
+              >
+                Windows x64 (.exe) ↓
+              </a>
+              <a
+                class="btn btn-secondary btn-sm"
+                href="https://github.com/Tsurematsu/klared/releases/latest/download/SHA256SUMS.txt"
+              >
+                SHA256SUMS ↓
+              </a>
+              <a
+                class="btn btn-secondary btn-sm"
+                href="https://github.com/Tsurematsu/klared/releases/latest"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Ver Releases ↗
+              </a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Atajos -->
+      <section class="section" id="atajos">
+        <div class="container">
+          <div class="section-header">
+            <div class="section-kicker">Productividad en terminal</div>
+            <h2>Atajos de teclado</h2>
+            <p>Todas las operaciones de tus túneles al alcance de una sola tecla.</p>
+          </div>
+
+          <div class="shortcuts-grid">
+            <div class="shortcut-item"><kbd>↑ / ↓</kbd><span>Navegar por la lista de túneles</span></div>
+            <div class="shortcut-item"><kbd>n</kbd><span>Instalar nuevo túnel con rollback</span></div>
+            <div class="shortcut-item"><kbd>i / Enter</kbd><span>Inspeccionar pods, /ready, logs y Services</span></div>
+            <div class="shortcut-item"><kbd>e</kbd><span>Editar agentes permitidos y réplicas</span></div>
+            <div class="shortcut-item"><kbd>m</kbd><span>Mover ya hacia otro agente Ready</span></div>
+            <div class="shortcut-item"><kbd>r</kbd><span>Reiniciar el Deployment seleccionado</span></div>
+            <div class="shortcut-item"><kbd>p</kbd><span>Pausar (0 réplicas) o reactivar</span></div>
+            <div class="shortcut-item"><kbd>t</kbd><span>Rotar token vía stdin y reiniciar</span></div>
+            <div class="shortcut-item"><kbd>c</kbd><span>Copiar URL interna sugerida</span></div>
+            <div class="shortcut-item"><kbd>a</kbd><span>Ver agentes k3s y auditar huérfanos</span></div>
+            <div class="shortcut-item"><kbd>x</kbd><span>Eliminar túnel y limpiar labels</span></div>
+            <div class="shortcut-item"><kbd>u / Q</kbd><span>Refrescar estado o salir</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="container footer-inner">
+        <div>
+          <strong>klared</strong> · Parte del ecosistema k3s junto a
+          <a href="https://tsurematsu.github.io/k3acess/" target="_blank" rel="noopener noreferrer">k3access</a>,
+          <a href="https://tsurematsu.github.io/kpg/" target="_blank" rel="noopener noreferrer">kpg</a> y
+          <a href="https://tsurematsu.github.io/tacl/" target="_blank" rel="noopener noreferrer">tacl</a>.
+        </div>
+        <div>
+          <a href="https://github.com/Tsurematsu/klared" target="_blank" rel="noopener noreferrer">
+            Repositorio en GitHub ↗
+          </a>
+        </div>
+      </div>
+    </footer>
+
+    <!-- Lightbox modal -->
+    <div class="lightbox" id="lightbox" aria-hidden="true" role="dialog" aria-label="Vista ampliada de captura">
+      <div class="lightbox-inner">
+        <div class="lightbox-top">
+          <div class="lightbox-caption" id="lightbox-caption"></div>
+          <div style="display: flex; gap: 0.5rem;">
+            <button class="btn btn-secondary btn-sm" type="button" id="lightbox-prev">← Anterior</button>
+            <button class="btn btn-secondary btn-sm" type="button" id="lightbox-next">Siguiente →</button>
+            <button class="btn btn-secondary btn-sm" type="button" id="lightbox-close">Cerrar (Esc)</button>
+          </div>
+        </div>
+        <div class="lightbox-img-wrap">
+          <img id="lightbox-img" src="" alt="" />
+        </div>
+      </div>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
