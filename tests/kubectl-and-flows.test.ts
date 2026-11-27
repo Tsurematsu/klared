@@ -9,11 +9,11 @@ import {
   buildOrphanAuditReport,
   deleteTunnel,
   installTunnel,
+  migrateTunnelNamespace,
   scaleTunnelReplicas,
   updateTunnelAssignment,
-  updateTunnelNodeLabelAffinity,
 } from '../src/services/tunnels.js';
-import type { NodeAgentInfo, TunnelInfo } from '../src/types/k8s.js';
+import type { NamespaceMeta, NodeAgentInfo, TunnelInfo } from '../src/types/k8s.js';
 
 const FAKE_TOKEN = 'eyJhIjoiMTIzNDU2Nzg5MCIsInQiOiJhYmNkZWYxMiIsInMiOiJzZWNyZXQifQ==';
 
@@ -250,7 +250,6 @@ describe('Flujo updateTunnelAssignment (orden seguro) y deleteTunnel', () => {
     status: 'ready',
     statusLabel: '● Ready',
     namespaceNodeSelector: null,
-    extraNodeLabel: null,
     appPodNodes: [],
     crossNodeTrafficWarning: false,
     services: [],
@@ -334,11 +333,15 @@ describe('Auditoría de huérfanos', () => {
         {
           name: 'mi-app',
           phase: 'Active',
+          isSystem: false,
+          isDefault: false,
           isProtected: false,
+          isManaged: true,
           description: '',
           nodeSelector: null,
           nodeSelectorSource: null,
           labels: { 'tsure.io/klared-dead01': 'true' },
+          toolLabels: ['klared-dead01'],
           klaredIds: ['dead01'],
         },
       ],
@@ -365,7 +368,6 @@ describe('Auditoría de huérfanos', () => {
           status: 'pending',
           statusLabel: '⚠ Pending',
           namespaceNodeSelector: null,
-          extraNodeLabel: null,
           appPodNodes: [],
           crossNodeTrafficWarning: false,
           services: [],
@@ -381,8 +383,8 @@ describe('Auditoría de huérfanos', () => {
   });
 });
 
-describe('Afinidad por label de nodo y escalado rápido', () => {
-  const nodesWithFlotip: NodeAgentInfo[] = [
+describe('Migración de namespace sin corte y escalado rápido', () => {
+  const clusterNodes: NodeAgentInfo[] = [
     {
       name: 'k3s-agent1',
       roles: ['worker'],
@@ -411,16 +413,46 @@ describe('Afinidad por label de nodo y escalado rápido', () => {
       osImage: 'Ubuntu',
       labels: {
         'kubernetes.io/hostname': 'k3s-agent2',
-        flotip: 'true',
       },
       cloudflaredIds: [],
+    },
+  ];
+
+  const clusterNamespaces: NamespaceMeta[] = [
+    {
+      name: 'default',
+      phase: 'Active',
+      isSystem: false,
+      isDefault: true,
+      isProtected: true,
+      isManaged: false,
+      description: '',
+      nodeSelector: null,
+      nodeSelectorSource: null,
+      labels: {},
+      toolLabels: [],
+      klaredIds: [],
+    },
+    {
+      name: 'flotip',
+      phase: 'Active',
+      isSystem: false,
+      isDefault: false,
+      isProtected: false,
+      isManaged: true,
+      description: 'Aplicacion empresarial',
+      nodeSelector: null,
+      nodeSelectorSource: null,
+      labels: { 'tsure.io/managed': 'true', 'tsure.io/kpg': 'true' },
+      toolLabels: ['kpg'],
+      klaredIds: [],
     },
   ];
 
   const sampleTunnel: TunnelInfo = {
     name: 'web',
     resourceName: 'cloudflared-web',
-    namespace: 'mi-app',
+    namespace: 'default',
     tunnelId: 'abc123',
     nodeLabelKey: 'tsure.io/cloudflared-abc123',
     namespaceLabelKey: 'tsure.io/klared-abc123',
@@ -439,75 +471,115 @@ describe('Afinidad por label de nodo y escalado rápido', () => {
     status: 'ready',
     statusLabel: '● Ready',
     namespaceNodeSelector: null,
-    extraNodeLabel: null,
     appPodNodes: [],
     crossNodeTrafficWarning: false,
     services: [],
     hasMissingAllowedAgents: false,
   };
 
-  it('aplica label de nodo (flotip=true) parcheando nodeAffinity y habilitando nodo compatible', async () => {
-    const calls: string[][] = [];
-    setKubectlExecutorForTesting(async (args) => {
-      calls.push(args);
+  it('migra túnel de default a flotip vía stdin, etiqueta flotip y limpia default sin corte', async () => {
+    const calls: Array<{ args: string[]; stdin?: string }> = [];
+    const encoded = Buffer.from(FAKE_TOKEN, 'utf8').toString('base64');
+
+    setKubectlExecutorForTesting(async (args, options) => {
+      calls.push({ args, stdin: options?.stdin });
+      if (args[0] === 'get' && args[1] === 'secret') {
+        return {
+          stdout: JSON.stringify({ data: { token: encoded } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
       return { stdout: 'ok', stderr: '', exitCode: 0 };
     });
 
-    const res = await updateTunnelNodeLabelAffinity({
+    const res = await migrateTunnelNamespace({
       tunnel: sampleTunnel,
-      selector: 'flotip=true',
-      allNodes: nodesWithFlotip,
+      targetNamespace: 'flotip',
+      allNodes: clusterNodes,
+      namespaces: clusterNamespaces,
+      existingTunnels: [sampleTunnel],
     });
 
-    assert.equal(res.appliedSelector, 'flotip=true');
-    assert.deepEqual(res.matchedAgents, ['k3s-agent2']);
+    assert.equal(res.sourceNamespace, 'default');
+    assert.equal(res.targetNamespace, 'flotip');
 
-    // k3s-agent2 was labeled with tsure.io/cloudflared-abc123 so pod won't become Pending
-    assert.ok(
-      calls.some(
-        (a) =>
-          a[0] === 'label' &&
-          a[1] === 'node' &&
-          a[2] === 'k3s-agent2' &&
-          a[3] === 'tsure.io/cloudflared-abc123=true',
-      ),
+    for (const c of calls) {
+      assert.equal(c.args.join(' ').includes(FAKE_TOKEN), false);
+    }
+
+    const labelTargetIdx = calls.findIndex(
+      (c) =>
+        c.args[0] === 'label' &&
+        c.args[1] === 'namespace' &&
+        c.args[2] === 'flotip' &&
+        c.args[3] === 'tsure.io/klared-abc123=true',
     );
-    const patchCall = calls.find((a) => a[0] === 'patch' && a[1] === 'deployment');
-    assert.ok(patchCall);
-    assert.ok(patchCall.join(' ').includes('"key":"flotip"'));
-    assert.ok(patchCall.join(' ').includes('"values":["true"]'));
-    assert.ok(calls.some((a) => a[0] === 'rollout' && a[1] === 'status'));
+    const applyIdx = calls.findIndex(
+      (c) => c.args[0] === 'apply' && c.args[1] === '-f' && c.args[2] === '-',
+    );
+    const rolloutIdx = calls.findIndex(
+      (c) => c.args[0] === 'rollout' && c.args[1] === 'status' && c.args.includes('flotip'),
+    );
+    const deleteOldDepIdx = calls.findIndex(
+      (c) =>
+        c.args[0] === 'delete' &&
+        c.args[1] === 'deployment' &&
+        c.args.includes('default'),
+    );
+
+    assert.ok(labelTargetIdx >= 0);
+    assert.ok(applyIdx > labelTargetIdx);
+    assert.equal(calls[applyIdx]?.stdin?.includes('"flotip"'), true);
+    assert.equal(calls[applyIdx]?.stdin?.includes(FAKE_TOKEN), true);
+    assert.ok(rolloutIdx > applyIdx);
+    assert.ok(deleteOldDepIdx > rolloutIdx);
+    assert.equal(
+      calls.some((c) => c.args[0] === 'label' && c.args[1] === 'namespace' && c.args[2] === 'default'),
+      false,
+    );
   });
 
-  it('ejecuta rollout undo y revierte labels si falla el rollout al aplicar label', async () => {
+  it('revierte el destino y mantiene intacto el origen si el rollout en destino falla', async () => {
     const calls: string[][] = [];
+    const encoded = Buffer.from(FAKE_TOKEN, 'utf8').toString('base64');
+
     setKubectlExecutorForTesting(async (args) => {
       calls.push(args);
+      if (args[0] === 'get' && args[1] === 'secret') {
+        return {
+          stdout: JSON.stringify({ data: { token: encoded } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
       if (args[0] === 'rollout' && args[1] === 'status') {
-        throw new Error('timeout');
+        throw new Error('timeout en flotip');
       }
       return { stdout: 'ok', stderr: '', exitCode: 0 };
     });
 
     await assert.rejects(
       () =>
-        updateTunnelNodeLabelAffinity({
+        migrateTunnelNamespace({
           tunnel: sampleTunnel,
-          selector: 'flotip=true',
-          allNodes: nodesWithFlotip,
+          targetNamespace: 'flotip',
+          allNodes: clusterNodes,
+          namespaces: clusterNamespaces,
+          existingTunnels: [sampleTunnel],
         }),
-      /timeout/,
+      /timeout en flotip/,
     );
 
-    assert.ok(calls.some((a) => a[0] === 'rollout' && a[1] === 'undo'));
     assert.ok(
-      calls.some(
-        (a) =>
-          a[0] === 'label' &&
-          a[1] === 'node' &&
-          a[2] === 'k3s-agent2' &&
-          a[3] === 'tsure.io/cloudflared-abc123-',
-      ),
+      calls.some((a) => a[0] === 'delete' && a[1] === 'deployment' && a.includes('flotip')),
+    );
+    assert.ok(
+      calls.some((a) => a[0] === 'label' && a[1] === 'namespace' && a[2] === 'flotip' && a[3]?.endsWith('-')),
+    );
+    assert.equal(
+      calls.some((a) => a[0] === 'delete' && a.includes('default')),
+      false,
     );
   });
 

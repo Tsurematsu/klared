@@ -1,16 +1,20 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Box, Text, useWindowSize } from 'ink';
-import type { TunnelInfo } from '../types/k8s.js';
-import { formatCompactNodeLabel } from '../utils/validation.js';
+import type {
+  ServiceEndpointInfo,
+  TunnelInfo,
+  ZeroTrustServiceType,
+} from '../types/k8s.js';
+import { buildZeroTrustUrlEntries } from '../utils/validation.js';
 
 export type DashboardFocusArea = 'table' | 'panel';
-export type QuickPanelItem = 'agents' | 'move' | 'replicas' | 'label';
+export type QuickPanelItem = 'agents' | 'move' | 'replicas' | 'namespace';
 
 export const QUICK_PANEL_ITEMS: readonly QuickPanelItem[] = [
   'agents',
   'move',
   'replicas',
-  'label',
+  'namespace',
 ] as const;
 
 export interface QuickPanelState {
@@ -21,15 +25,16 @@ export interface QuickPanelState {
   draftReplicas: number;
   maxReplicas: number;
   replicasDirty: boolean;
-  draftLabel: string | null;
-  draftLabelShort: string;
-  labelOptionsCount: number;
-  labelDirty: boolean;
+  draftNamespace: string;
+  draftNamespaceBadge: string | null;
+  namespaceOptionsCount: number;
+  namespaceDirty: boolean;
   busyText: string | null;
 }
 
 export interface DashboardScreenProps {
   tunnels: TunnelInfo[];
+  clusterServices: ServiceEndpointInfo[];
   selectedIndex: number;
   focusArea: DashboardFocusArea;
   panelState: QuickPanelState | null;
@@ -57,6 +62,21 @@ function statusColor(status: TunnelInfo['status']): string {
       return 'yellow';
     case 'error':
       return 'red';
+  }
+}
+
+function ztTypeColor(ztType: ZeroTrustServiceType): string {
+  switch (ztType) {
+    case 'HTTP':
+      return 'green';
+    case 'HTTPS':
+      return 'cyan';
+    case 'TCP':
+      return 'yellow';
+    case 'SSH':
+      return 'magenta';
+    case 'RDP':
+      return 'blue';
   }
 }
 
@@ -88,6 +108,7 @@ function formatAgentsPreview(agents: string[], maxChars: number): string {
 
 export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   tunnels,
+  clusterServices,
   selectedIndex,
   focusArea,
   panelState,
@@ -96,7 +117,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   const { columns, rows } = useWindowSize();
   const termWidth = Math.max(72, (columns || 100) - 6);
   const compact = termWidth < 96;
-  const twoColumns = termWidth >= 82;
+  const sideBySide = (columns || 100) >= 104;
 
   const colName = compact ? 13 : 16;
   const colNs = compact ? 12 : 14;
@@ -109,8 +130,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     termWidth - (colName + colNs + colId + colStatus + colRep + colVer + 9),
   );
 
-  // Reserve lines for header (3), table chrome (4), quick panel (6-8), footer (4)
-  const panelReserve = tunnels.length > 0 ? (twoColumns ? 7 : 9) : 2;
+  // Reserve lines for header (3), table chrome (4), lower panels, footer (4)
+  const panelReserve = tunnels.length > 0 ? (sideBySide ? 9 : 13) : 2;
   const maxVisibleRows = Math.max(3, (rows || 24) - (11 + panelReserve));
   const scrollStart = Math.max(
     0,
@@ -127,11 +148,28 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
 
   const hasAnyDirty = Boolean(
     panelState &&
-      (panelState.moveDirty || panelState.replicasDirty || panelState.labelDirty),
+      (panelState.moveDirty ||
+        panelState.replicasDirty ||
+        panelState.namespaceDirty),
   );
 
-  const cellWidth = twoColumns ? Math.floor((termWidth - 4) / 2) : termWidth - 2;
-  const valuePreviewMax = Math.max(12, cellWidth - 15);
+  const ztEntries = useMemo(
+    () => buildZeroTrustUrlEntries(clusterServices, selected?.namespace ?? null),
+    [clusterServices, selected?.namespace],
+  );
+  const sameNsZtEntries = useMemo(
+    () => ztEntries.filter((e) => e.sameNamespace),
+    [ztEntries],
+  );
+  const otherNsZtEntries = useMemo(
+    () => ztEntries.filter((e) => !e.sameNamespace),
+    [ztEntries],
+  );
+
+  const controlsPreviewMax = Math.max(
+    16,
+    (sideBySide ? Math.floor(termWidth * 0.52) : termWidth) - 24,
+  );
 
   const renderPanelItem = (
     item: QuickPanelItem,
@@ -141,11 +179,13 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
       dirty?: boolean;
       canSlide?: boolean;
       valueColor?: string;
+      suffix?: string | null;
     } = {},
   ) => {
     const isFocused = panelFocused && panelState?.activeItem === item;
-    const { dirty = false, canSlide = false, valueColor } = options;
+    const { dirty = false, canSlide = false, valueColor, suffix } = options;
     const prefix = isFocused ? '▸ ' : '  ';
+    const paddedLabel = label.padEnd(9);
     const bracketColor = isFocused
       ? dirty
         ? 'yellow'
@@ -156,25 +196,24 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     const displayVal = canSlide ? `<${valueText}>` : valueText;
 
     return (
-      <Box width={twoColumns ? cellWidth : undefined}>
-        <Text color={bracketColor} bold={isFocused} wrap="truncate-end">
-          {prefix}[
-          <Text color={isFocused ? 'cyan' : 'white'} bold={isFocused}>
-            {label}:
-          </Text>{' '}
-          <Text
-            color={
-              dirty
-                ? 'yellow'
-                : valueColor ?? (isFocused ? 'green' : 'white')
-            }
-            bold={isFocused || dirty}
-          >
-            {displayVal}
-          </Text>
-          {dirty ? <Text color="yellow">*</Text> : null}]
+      <Text color={bracketColor} bold={isFocused} wrap="truncate-end">
+        {prefix}[
+        <Text color={isFocused ? 'cyan' : 'white'} bold={isFocused}>
+          {paddedLabel}:
+        </Text>{' '}
+        <Text
+          color={
+            dirty
+              ? 'yellow'
+              : (valueColor ?? (isFocused ? 'green' : 'white'))
+          }
+          bold={isFocused || dirty}
+        >
+          {displayVal}
         </Text>
-      </Box>
+        {dirty ? <Text color="yellow">*</Text> : null}]
+        {suffix ? <Text dimColor> {suffix}</Text> : null}
+      </Text>
     );
   };
 
@@ -194,83 +233,79 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         case 'agents':
           return (
             <Text color="cyan" wrap="truncate-end">
-              ⏎ Enter abre el modal de multiselección de agentes permitidos.
+              ⏎ Enter abre multiselección de agentes permitidos.
             </Text>
           );
         case 'move':
           if (selected.replicas === 0) {
             return (
               <Text color="magenta" wrap="truncate-end">
-                Túnel pausado — reactívalo en Inspección (i) → (p) antes de mover.
+                Pausado — reactívalo en Inspección (i) → (p).
               </Text>
             );
           }
           if (panelState.moveDirty && panelState.moveTarget) {
             return (
               <Text color="yellow" bold wrap="truncate-end">
-                ⏎ Enter moverá "{selected.name}" a {panelState.moveTarget} sin corte (Esc cancela).
+                ⏎ Enter moverá a {panelState.moveTarget} sin corte (Esc cancela).
               </Text>
             );
           }
           return (
             <Text dimColor wrap="truncate-end">
               {panelState.moveOptionsCount > 1
-                ? 'Usa ←/→ para elegir otro agente permitido Ready y Enter para mover.'
-                : 'Solo 1 agente permitido Ready — edita Agentes para añadir otro destino.'}
+                ? '←/→ cambia agente destino · Enter aplica.'
+                : 'Solo 1 agente permitido Ready — edita Agentes.'}
             </Text>
           );
         case 'replicas':
           if (panelState.replicasDirty) {
             return (
               <Text color="yellow" bold wrap="truncate-end">
-                ⏎ Enter escalará "{selected.name}" a {panelState.draftReplicas} réplica
+                ⏎ Enter escalará a {panelState.draftReplicas} réplica
                 {panelState.draftReplicas === 1 ? '' : 's'} (máx {panelState.maxReplicas}).
               </Text>
             );
           }
           return (
             <Text dimColor wrap="truncate-end">
-              Usa ←/→ para ajustar réplicas (1..{panelState.maxReplicas}) y Enter para aplicar.
+              ←/→ ajusta réplicas (1..{panelState.maxReplicas}) · Enter aplica.
             </Text>
           );
-        case 'label':
-          if (panelState.labelDirty) {
+        case 'namespace':
+          if (panelState.namespaceDirty) {
             return (
               <Text color="yellow" bold wrap="truncate-end">
-                ⏎ Enter aplicará afinidad de nodo:{' '}
-                {panelState.draftLabel ?? 'ninguno (quitar label)'}.
+                ⏎ Enter moverá al namespace "{panelState.draftNamespace}" sin corte.
               </Text>
             );
           }
           return (
             <Text dimColor wrap="truncate-end">
-              {panelState.labelOptionsCount > 1
-                ? 'Usa ←/→ para elegir label y Enter para aplicar · pulsa (l) para ver todos.'
-                : 'Sin labels custom detectados en nodos · pulsa (l) para ver todos los labels.'}
+              ←/→ cambia namespace (k3access + default) · (l) lista.
             </Text>
           );
       }
     }
 
-    // When table is focused, show alerts or concise tunnel metadata
     if (selected.hasMissingAllowedAgents) {
       return (
         <Text color="red" wrap="truncate-end">
-          ✗ Sin agentes con {selected.nodeLabelKey} — pulsa Tab → Agentes para reasignar.
+          ✗ Sin agentes con {selected.nodeLabelKey} — Tab → Agentes.
         </Text>
       );
     }
     if (selected.status === 'pending') {
       return (
         <Text color="yellow" wrap="truncate-end">
-          ⚠ Pod en Pending — pulsa (i) para diagnóstico o Tab para ajustar agentes/label.
+          ⚠ Pod Pending — (i) diagnóstico o Tab para ajustar.
         </Text>
       );
     }
     if (selected.crossNodeTrafficWarning) {
       return (
         <Text color="cyan" wrap="truncate-end">
-          ℹ Tráfico tailnet: túnel en [{selected.runningAgents.join(',')}] · app en [{selected.appPodNodes.join(',')}].
+          ℹ Tailnet: túnel [{selected.runningAgents.join(',')}] · app [{selected.appPodNodes.join(',')}].
         </Text>
       );
     }
@@ -279,21 +314,79 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         <Text color="white">{selected.resourceName}</Text>
         {' · '}
         <Text color="yellow">{selected.nodeLabelKey}</Text>
-        {selected.extraNodeLabel ? (
-          <>
-            {' · '}label:{' '}
-            <Text color="yellow">{formatCompactNodeLabel(selected.extraNodeLabel)}</Text>
-          </>
-        ) : null}
-        {selected.services[0]?.suggestedUrls[0] ? (
-          <>
-            {' · '}URL:{' '}
-            <Text color="green">{selected.services[0].suggestedUrls[0]}</Text>
-            {selected.services.length > 1 ? ` (+${selected.services.length - 1})` : ''}
-          </>
-        ) : null}
         {selected.description ? ` · ${selected.description}` : ''}
       </Text>
+    );
+  };
+
+  const renderZeroTrustPanel = () => {
+    if (!selected) return null;
+    const displayList =
+      sameNsZtEntries.length > 0 ? sameNsZtEntries : otherNsZtEntries;
+    const isCrossOnly = sameNsZtEntries.length === 0 && otherNsZtEntries.length > 0;
+    const maxPreview = sideBySide ? 4 : 2;
+
+    return (
+      <Box
+        borderStyle="round"
+        borderColor="green"
+        flexDirection="column"
+        paddingX={1}
+        flexGrow={1}
+        width={sideBySide ? '48%' : undefined}
+      >
+        <Box justifyContent="space-between">
+          <Text bold color="green" wrap="truncate-end">
+            Zero Trust URLs ({selected.namespace})
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            (z) abrir y copiar
+          </Text>
+        </Box>
+
+        {displayList.length === 0 ? (
+          <Box flexDirection="column">
+            <Text dimColor wrap="truncate-end">
+              Sin Services TCP detectados en el clúster todavía.
+            </Text>
+            <Text dimColor wrap="truncate-end">
+              Cuando exista un Service en "{selected.namespace}", verás aquí Type + URL.
+            </Text>
+          </Box>
+        ) : (
+          <Box flexDirection="column">
+            {isCrossOnly ? (
+              <Text color="yellow" wrap="truncate-end">
+                Sin Services en "{selected.namespace}" · otros namespaces (FQDN):
+              </Text>
+            ) : null}
+            {displayList.slice(0, maxPreview).map((entry) => (
+              <Text
+                key={`${entry.namespace}/${entry.serviceName}:${entry.port}`}
+                wrap="truncate-end"
+              >
+                <Text color={ztTypeColor(entry.ztType)} bold>
+                  {entry.ztType.padEnd(5)}
+                </Text>{' '}
+                <Text color="white">{entry.fullUrl}</Text>{' '}
+                <Text dimColor>
+                  ({entry.sameNamespace ? entry.serviceType : entry.namespace})
+                </Text>
+              </Text>
+            ))}
+            {displayList.length > maxPreview ? (
+              <Text dimColor wrap="truncate-end">
+                +{displayList.length - maxPreview} más — pulsa (z) para ver y copiar
+              </Text>
+            ) : null}
+          </Box>
+        )}
+
+        <Text dimColor wrap="truncate-end">
+          Zero Trust → Public Hostname · {sameNsZtEntries.length} en ns
+          {otherNsZtEntries.length > 0 ? ` · ${otherNsZtEntries.length} otros ns` : ''}
+        </Text>
+      </Box>
     );
   };
 
@@ -337,7 +430,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             </Text>
             <Text dimColor>
               Pulsa <Text color="green" bold>(n)</Text> para crear uno,{' '}
-              <Text color="cyan" bold>(l)</Text> para ver labels de nodos o{' '}
+              <Text color="green" bold>(z)</Text> para URLs Zero Trust,{' '}
+              <Text color="cyan" bold>(l)</Text> para namespaces o{' '}
               <Text color="yellow" bold>(a)</Text> para auditoría.
             </Text>
           </Box>
@@ -405,83 +499,31 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         ) : null}
       </Box>
 
-      {/* Panel de controles rápidos del túnel seleccionado */}
+      {/* Paneles inferiores: Controles (lista vertical) + Asistente Zero Trust URLs */}
       {selected && panelState ? (
-        <Box
-          borderStyle="round"
-          borderColor={panelFocused ? (hasAnyDirty ? 'yellow' : 'cyan') : 'gray'}
-          flexDirection="column"
-          paddingX={1}
-        >
-          <Box justifyContent="space-between">
-            <Text bold color={panelFocused ? 'cyan' : 'white'} wrap="truncate-end">
-              Controles: {selected.name}
-              <Text dimColor> ({selected.namespace})</Text>
-            </Text>
-            <Text dimColor wrap="truncate-end">
-              {panelFocused
-                ? '↑/↓ ítem · ←/→ valor · Enter aplicar · Esc tabla'
-                : 'Tab → controles · Enter/i → inspección'}
-            </Text>
-          </Box>
+        <Box flexDirection={sideBySide ? 'row' : 'column'}>
+          <Box
+            borderStyle="round"
+            borderColor={panelFocused ? (hasAnyDirty ? 'yellow' : 'cyan') : 'gray'}
+            flexDirection="column"
+            paddingX={1}
+            width={sideBySide ? '52%' : undefined}
+            marginRight={sideBySide ? 1 : 0}
+          >
+            <Box justifyContent="space-between">
+              <Text bold color={panelFocused ? 'cyan' : 'white'} wrap="truncate-end">
+                Controles: {selected.name}
+              </Text>
+              <Text dimColor wrap="truncate-end">
+                {panelFocused ? '↑/↓ · ←/→ · Enter' : 'Tab → editar'}
+              </Text>
+            </Box>
 
-          {twoColumns ? (
-            <>
-              <Box>
-                {renderPanelItem(
-                  'agents',
-                  'Agentes',
-                  formatAgentsPreview(selected.allowedAgents, valuePreviewMax),
-                  {
-                    valueColor:
-                      selected.allowedAgents.length > 0 ? 'green' : 'red',
-                  },
-                )}
-                {renderPanelItem(
-                  'move',
-                  'Mover',
-                  selected.replicas === 0
-                    ? 'pausado'
-                    : (panelState.moveTarget ?? 'sin Ready'),
-                  {
-                    canSlide: selected.replicas > 0,
-                    dirty: panelState.moveDirty,
-                    valueColor:
-                      selected.replicas === 0
-                        ? 'magenta'
-                        : panelState.moveTarget
-                          ? 'cyan'
-                          : 'gray',
-                  },
-                )}
-              </Box>
-              <Box>
-                {renderPanelItem(
-                  'replicas',
-                  'Réplicas',
-                  panelState.draftReplicas === 0
-                    ? '0 (pausa)'
-                    : `${panelState.draftReplicas}/${panelState.maxReplicas}`,
-                  {
-                    canSlide: true,
-                    dirty: panelState.replicasDirty,
-                    valueColor:
-                      panelState.draftReplicas === 0 ? 'magenta' : 'green',
-                  },
-                )}
-                {renderPanelItem('label', 'Label', panelState.draftLabelShort, {
-                  canSlide: true,
-                  dirty: panelState.labelDirty,
-                  valueColor: panelState.draftLabel ? 'yellow' : 'gray',
-                })}
-              </Box>
-            </>
-          ) : (
             <Box flexDirection="column">
               {renderPanelItem(
                 'agents',
                 'Agentes',
-                formatAgentsPreview(selected.allowedAgents, valuePreviewMax),
+                formatAgentsPreview(selected.allowedAgents, controlsPreviewMax),
                 {
                   valueColor:
                     selected.allowedAgents.length > 0 ? 'green' : 'red',
@@ -517,15 +559,20 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                     panelState.draftReplicas === 0 ? 'magenta' : 'green',
                 },
               )}
-              {renderPanelItem('label', 'Label', panelState.draftLabelShort, {
+              {renderPanelItem('namespace', 'Namespace', panelState.draftNamespace, {
                 canSlide: true,
-                dirty: panelState.labelDirty,
-                valueColor: panelState.draftLabel ? 'yellow' : 'gray',
+                dirty: panelState.namespaceDirty,
+                valueColor: 'yellow',
+                suffix: panelState.draftNamespaceBadge
+                  ? `[${panelState.draftNamespaceBadge}]`
+                  : null,
               })}
             </Box>
-          )}
 
-          {renderPanelHint()}
+            {renderPanelHint()}
+          </Box>
+
+          {renderZeroTrustPanel()}
         </Box>
       ) : null}
     </Box>

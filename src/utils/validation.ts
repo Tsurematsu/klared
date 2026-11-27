@@ -1,11 +1,15 @@
 import type {
   AgentEligibility,
+  NamespaceMeta,
   NodeAgentInfo,
-  NodeLabelOption,
+  ServiceEndpointInfo,
   TunnelProtocol,
+  ZeroTrustServiceType,
+  ZeroTrustUrlEntry,
 } from '../types/k8s.js';
 
 export const TSURE_PREFIX = 'tsure.io/';
+export const TSURE_MANAGED_LABEL_KEY = 'tsure.io/managed';
 export const CLOUDFLARED_RESOURCE_PREFIX = 'cloudflared-';
 export const CLOUDFLARED_MANAGED_LABEL_KEY = 'tsure.io/cloudflared';
 export const CLOUDFLARED_NODE_LABEL_PREFIX = 'tsure.io/cloudflared-';
@@ -15,7 +19,6 @@ export const TUNNEL_ID_ANNOTATION = 'tsure.io/tunnel-id';
 export const AGENTS_ANNOTATION = 'tsure.io/agents';
 export const DESCRIPTION_ANNOTATION = 'tsure.io/description';
 export const DESIRED_REPLICAS_ANNOTATION = 'tsure.io/desired-replicas';
-export const NODE_LABEL_AFFINITY_ANNOTATION = 'tsure.io/node-label-affinity';
 
 export const K8S_NODE_SELECTOR_ANNOTATION =
   'scheduler.alpha.kubernetes.io/node-selector';
@@ -29,12 +32,16 @@ export const TUNNEL_PROTOCOLS: readonly TunnelProtocol[] = [
 ] as const;
 export const DEFAULT_TUNNEL_PROTOCOL: TunnelProtocol = 'http2';
 
-export const PROTECTED_NAMESPACES = new Set<string>([
-  'default',
+export const SYSTEM_NAMESPACES = new Set<string>([
   'kube-system',
   'kube-public',
   'kube-node-lease',
   'cnpg-system',
+]);
+
+export const PROTECTED_NAMESPACES = new Set<string>([
+  'default',
+  ...SYSTEM_NAMESPACES,
 ]);
 
 const DNS_1123_REGEX = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
@@ -48,8 +55,34 @@ const IMAGE_TAG_REGEX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /** Max logical tunnel name length so "cloudflared-<name>" stays <= 63 chars */
 export const MAX_TUNNEL_NAME_LENGTH = 63 - CLOUDFLARED_RESOURCE_PREFIX.length;
 
+export function isSystemNamespace(name: string): boolean {
+  return SYSTEM_NAMESPACES.has(name);
+}
+
+export function isDefaultNamespace(name: string): boolean {
+  return name === 'default';
+}
+
 export function isProtectedNamespace(name: string): boolean {
   return PROTECTED_NAMESPACES.has(name);
+}
+
+/**
+ * Returns Active namespaces eligible to host cloudflared tunnels:
+ * k3access-managed namespaces first, then other non-system user namespaces,
+ * and finally "default". System namespaces are excluded.
+ */
+export function getSelectableNamespaces(
+  namespaces: NamespaceMeta[],
+): NamespaceMeta[] {
+  return namespaces
+    .filter((ns) => !ns.isSystem && ns.phase === 'Active')
+    .sort((a, b) => {
+      const rank = (ns: NamespaceMeta) =>
+        ns.isManaged ? 0 : ns.isDefault ? 2 : 1;
+      const diff = rank(a) - rank(b);
+      return diff !== 0 ? diff : a.name.localeCompare(b.name);
+    });
 }
 
 export function buildResourceName(tunnelName: string): string {
@@ -491,177 +524,76 @@ export function summarizeCloudflaredLogDiagnostic(rawLogs: string): string {
   return ` | Logs: ${picked.join(' / ')}`;
 }
 
-const SYSTEM_NODE_LABEL_PREFIXES = [
-  'kubernetes.io/',
-  'beta.kubernetes.io/',
-  'node.kubernetes.io/',
-  'k3s.io/',
-  'node-role.kubernetes.io/',
-];
+const KNOWN_HTTPS_PORTS = new Set([443, 8443, 9443]);
+const KNOWN_TCP_PORTS = new Set([
+  1433, // MSSQL
+  3306, // MySQL / MariaDB
+  5432, // PostgreSQL
+  5672, // RabbitMQ / AMQP
+  6379, // Redis
+  9092, // Kafka
+  27017, // MongoDB
+]);
 
-export function isSystemNodeLabelKey(key: string): boolean {
-  return SYSTEM_NODE_LABEL_PREFIXES.some((prefix) => key.startsWith(prefix));
+export function detectZeroTrustServiceType(
+  port: number,
+  portName?: string,
+): ZeroTrustServiceType {
+  const name = (portName ?? '').toLowerCase();
+  if (port === 22 || name.includes('ssh')) return 'SSH';
+  if (port === 3389 || name.includes('rdp')) return 'RDP';
+  if (KNOWN_HTTPS_PORTS.has(port) || name.includes('https') || name.includes('tls')) {
+    return 'HTTPS';
+  }
+  if (
+    KNOWN_TCP_PORTS.has(port) ||
+    /postgres|pgsql|^pg$|mysql|mariadb|redis|mongo|amqp|kafka|mssql|grpc/.test(name)
+  ) {
+    return 'TCP';
+  }
+  return 'HTTP';
 }
 
-export interface ParsedSingleNodeLabel {
-  valid: boolean;
-  selector: string | null;
-  key: string | null;
-  value: string | null;
-  error?: string;
-}
+export function buildZeroTrustUrlEntries(
+  services: ServiceEndpointInfo[],
+  tunnelNamespace: string | null,
+): ZeroTrustUrlEntry[] {
+  const entries: ZeroTrustUrlEntry[] = [];
 
-export function parseSingleNodeLabelSelector(
-  raw: string | null | undefined,
-): ParsedSingleNodeLabel {
-  const trimmed = (raw ?? '').trim();
-  if (!trimmed) {
-    return { valid: true, selector: null, key: null, value: null };
-  }
+  for (const svc of services) {
+    for (const p of svc.ports) {
+      if ((p.protocol || 'TCP').toUpperCase() !== 'TCP') continue;
+      const ztType = detectZeroTrustServiceType(p.port, p.name);
+      const shortTarget = `${svc.name}:${p.port}`;
+      const fqdnTarget = `${svc.name}.${svc.namespace}.svc.cluster.local:${p.port}`;
+      const sameNamespace =
+        tunnelNamespace !== null && svc.namespace === tunnelNamespace;
+      const recommendedTarget = sameNamespace ? shortTarget : fqdnTarget;
+      const scheme = ztType.toLowerCase();
 
-  const eqIdx = trimmed.indexOf('=');
-  if (eqIdx === -1) {
-    if (!isValidLabelKey(trimmed)) {
-      return {
-        valid: false,
-        selector: null,
-        key: null,
-        value: null,
-        error: `Clave de label inválida: "${trimmed}".`,
-      };
-    }
-    return { valid: true, selector: trimmed, key: trimmed, value: null };
-  }
-
-  const key = trimmed.slice(0, eqIdx).trim();
-  const value = trimmed.slice(eqIdx + 1).trim();
-  if (!isValidLabelKey(key)) {
-    return {
-      valid: false,
-      selector: null,
-      key: null,
-      value: null,
-      error: `Clave de label inválida: "${key}".`,
-    };
-  }
-  if (value.length > 63 || !LABEL_VALUE_REGEX.test(value)) {
-    return {
-      valid: false,
-      selector: null,
-      key: null,
-      value: null,
-      error: `Valor de label inválido: "${value}".`,
-    };
-  }
-  const selector = value === '' ? key : `${key}=${value}`;
-  return {
-    valid: true,
-    selector,
-    key,
-    value: value === '' ? null : value,
-  };
-}
-
-export function formatCompactNodeLabel(
-  selector: string | null | undefined,
-): string {
-  const parsed = parseSingleNodeLabelSelector(selector);
-  if (!parsed.valid || !parsed.key) {
-    return selector?.trim() || 'ninguno';
-  }
-  const slashIdx = parsed.key.lastIndexOf('/');
-  const baseKey = slashIdx >= 0 ? parsed.key.slice(slashIdx + 1) : parsed.key;
-  if (!parsed.value || parsed.value.toLowerCase() === 'true') {
-    return baseKey;
-  }
-  return `${baseKey}=${parsed.value}`;
-}
-
-export function matchNodesForLabelAffinity(
-  selector: string | null | undefined,
-  nodes: NodeAgentInfo[],
-): NodeAgentInfo[] {
-  if (!selector) return nodes;
-  const parsed = parseSingleNodeLabelSelector(selector);
-  if (!parsed.valid || !parsed.key) return [];
-  const key = parsed.key;
-  if (parsed.value === null) {
-    return nodes.filter((node) => node.labels[key] !== undefined);
-  }
-  return nodes.filter((node) => node.labels[key] === parsed.value);
-}
-
-/**
- * Discovers existing node labels across worker agents (excluding control-plane
- * and internal tsure.io/cloudflared-* per-tunnel labels).
- */
-export function collectClusterNodeLabels(
-  nodes: NodeAgentInfo[],
-): NodeLabelOption[] {
-  const workerAgents = nodes.filter((n) => !n.isControlPlane);
-  const bySelector = new Map<
-    string,
-    {
-      key: string;
-      value: string;
-      selector: string;
-      nodes: Set<string>;
-      readyNodes: Set<string>;
-      isSystem: boolean;
-    }
-  >();
-
-  for (const agent of workerAgents) {
-    for (const [key, value] of Object.entries(agent.labels)) {
-      if (key.startsWith(CLOUDFLARED_NODE_LABEL_PREFIX)) continue;
-      if (key === CLOUDFLARED_MANAGED_LABEL_KEY) continue;
-
-      const selector = value === '' ? key : `${key}=${value}`;
-      let entry = bySelector.get(selector);
-      if (!entry) {
-        entry = {
-          key,
-          value,
-          selector,
-          nodes: new Set(),
-          readyNodes: new Set(),
-          isSystem: isSystemNodeLabelKey(key),
-        };
-        bySelector.set(selector, entry);
-      }
-      entry.nodes.add(agent.name);
-      if (agent.ready && !agent.unschedulable) {
-        entry.readyNodes.add(agent.name);
-      }
+      entries.push({
+        serviceName: svc.name,
+        namespace: svc.namespace,
+        serviceType: svc.type,
+        clusterIp: svc.clusterIp,
+        port: p.port,
+        portName: p.name,
+        ztType,
+        shortTarget,
+        fqdnTarget,
+        recommendedTarget,
+        fullUrl: `${scheme}://${recommendedTarget}`,
+        sameNamespace,
+      });
     }
   }
 
-  const rawList = Array.from(bySelector.values());
-  const shortCounts = new Map<string, number>();
-  for (const item of rawList) {
-    const short = formatCompactNodeLabel(item.selector);
-    shortCounts.set(short, (shortCounts.get(short) ?? 0) + 1);
-  }
-
-  const result: NodeLabelOption[] = rawList.map((item) => {
-    const compact = formatCompactNodeLabel(item.selector);
-    const shortLabel =
-      (shortCounts.get(compact) ?? 0) > 1 ? item.selector : compact;
-    return {
-      key: item.key,
-      value: item.value,
-      selector: item.selector,
-      shortLabel,
-      nodes: Array.from(item.nodes).sort(),
-      readyNodes: Array.from(item.readyNodes).sort(),
-      isSystem: item.isSystem,
-    };
+  entries.sort((a, b) => {
+    if (a.sameNamespace !== b.sameNamespace) return a.sameNamespace ? -1 : 1;
+    if (a.namespace !== b.namespace) return a.namespace.localeCompare(b.namespace);
+    if (a.serviceName !== b.serviceName) return a.serviceName.localeCompare(b.serviceName);
+    return a.port - b.port;
   });
 
-  result.sort((a, b) => {
-    if (a.isSystem !== b.isSystem) return a.isSystem ? 1 : -1;
-    return a.selector.localeCompare(b.selector);
-  });
-
-  return result;
+  return entries;
 }

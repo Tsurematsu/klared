@@ -183,12 +183,13 @@ npm run build:sea
 | Tecla | Acción |
 | :---: | :--- |
 | `↑` / `↓` (o `j` / `k`) | Navegar por la lista de túneles (en la tabla) o ítems del panel rápido |
-| `Tab` / `Shift+Tab` | Alternar foco entre la tabla de túneles y el panel rápido (`Agentes`, `Mover`, `Réplicas`, `Label`) |
-| `←` / `→` | Ajustar valor en el panel rápido (`Mover`, `Réplicas`, `Label`) |
+| `Tab` / `Shift+Tab` | Alternar foco entre la tabla de túneles y el panel rápido en lista (`Agentes`, `Mover`, `Réplicas`, `Namespace`) |
+| `←` / `→` | Ajustar valor en el panel rápido (`Mover`, `Réplicas`, `Namespace`) |
 | `Enter` | Abrir Inspección (desde la tabla) o abrir/aplicar el control enfocado (desde el panel) |
 | `n` | Instalar un nuevo túnel (`Secret` + `Deployment` con rollback) |
 | `i` | Abrir el menú de Inspección del túnel seleccionado |
-| `l` | Ver la lista completa de labels de nodos del clúster y aplicarlos al túnel |
+| `z` | Abrir el asistente de URLs para Cloudflare Zero Trust (por namespace, `HTTP`/`HTTPS`/`TCP`, DNS corto/FQDN) |
+| `l` | Ver la lista completa de namespaces (`k3access` + `default`) y mover el túnel sin corte |
 | `u` | Refrescar manualmente (además del refresco automático cada 5 s) |
 | `Q` / `Esc` | Volver a la tabla (desde el panel) o salir y restaurar la terminal |
 

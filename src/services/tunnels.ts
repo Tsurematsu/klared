@@ -24,13 +24,13 @@ import {
   DEFAULT_TUNNEL_PROTOCOL,
   DESCRIPTION_ANNOTATION,
   DESIRED_REPLICAS_ANNOTATION,
+  detectZeroTrustServiceType,
   extractImageVersion,
   extractTunnelLogicalName,
   extractTunnelProtocol,
   extractTunnelToken,
-  matchNodesForLabelAffinity,
-  NODE_LABEL_AFFINITY_ANNOTATION,
-  parseSingleNodeLabelSelector,
+  isDefaultNamespace,
+  isSystemNamespace,
   summarizeCloudflaredLogDiagnostic,
   TUNNEL_ID_ANNOTATION,
   validateImageVersion,
@@ -161,37 +161,11 @@ function extractTunnelIdFromDeployment(dep: K8sDeploymentItem): string {
   return 'sin-id';
 }
 
-function extractExtraNodeLabelFromDeployment(
-  dep: K8sDeploymentItem,
-  nodeLabelKey: string,
-): string | null {
-  const terms =
-    dep.spec?.template?.spec?.affinity?.nodeAffinity
-      ?.requiredDuringSchedulingIgnoredDuringExecution?.nodeSelectorTerms ?? [];
-  for (const term of terms) {
-    for (const expr of term.matchExpressions ?? []) {
-      const key = expr.key?.trim() ?? '';
-      if (!key || key === nodeLabelKey) continue;
-      if (expr.operator === 'In' && expr.values && expr.values.length > 0) {
-        const val = expr.values[0] ?? '';
-        return val === '' ? key : `${key}=${val}`;
-      }
-      if (expr.operator === 'Exists') {
-        return key;
-      }
-    }
-  }
-
-  const fromAnnotation =
-    dep.metadata?.annotations?.[NODE_LABEL_AFFINITY_ANNOTATION]?.trim() || null;
-  return fromAnnotation;
-}
-
 function buildSuggestedUrls(serviceName: string, ports: ServiceEndpointInfo['ports']): string[] {
   const urls: string[] = [];
   for (const p of ports) {
     if ((p.protocol || 'TCP').toUpperCase() !== 'TCP') continue;
-    const scheme = p.port === 443 || p.port === 8443 ? 'https' : 'http';
+    const scheme = detectZeroTrustServiceType(p.port, p.name).toLowerCase();
     urls.push(`${scheme}://${serviceName}:${p.port}`);
   }
   return urls;
@@ -314,9 +288,18 @@ export async function getClusterSnapshot(): Promise<ClusterSnapshot> {
     bucket.push(info);
     servicesByNs.set(ns, bucket);
   }
-  for (const list of servicesByNs.values()) {
+  const allUserServices: ServiceEndpointInfo[] = [];
+  for (const [ns, list] of servicesByNs.entries()) {
     list.sort((a, b) => a.name.localeCompare(b.name));
+    if (!isSystemNamespace(ns)) {
+      allUserServices.push(...list);
+    }
   }
+  allUserServices.sort((a, b) =>
+    a.namespace === b.namespace
+      ? a.name.localeCompare(b.name)
+      : a.namespace.localeCompare(b.namespace),
+  );
 
   // Group Pods by namespace (both tunnel pods and non-tunnel app pods)
   const allPods = podList.items ?? [];
@@ -344,7 +327,6 @@ export async function getClusterSnapshot(): Promise<ClusterSnapshot> {
     const annotations = dep.metadata?.annotations ?? {};
     const tunnelId = extractTunnelIdFromDeployment(dep);
     const nodeLabelKey = buildNodeLabelKey(tunnelId);
-    const extraNodeLabel = extractExtraNodeLabelFromDeployment(dep, nodeLabelKey);
     const namespaceLabelKey = buildNamespaceLabelKey(tunnelId);
     const description = annotations[DESCRIPTION_ANNOTATION] ?? '';
 
@@ -473,7 +455,6 @@ export async function getClusterSnapshot(): Promise<ClusterSnapshot> {
       status,
       statusLabel,
       namespaceNodeSelector: nsMeta?.nodeSelector ?? null,
-      extraNodeLabel,
       appPodNodes,
       crossNodeTrafficWarning,
       services: servicesByNs.get(namespace) ?? [],
@@ -494,6 +475,7 @@ export async function getClusterSnapshot(): Promise<ClusterSnapshot> {
     agents,
     namespaces,
     tunnels,
+    services: allUserServices,
     orphans,
     podNodeSelectorEnabled: null,
     fetchedAt: new Date(),
@@ -693,15 +675,19 @@ export async function installTunnel(
     }
     mark(1, 'ok', `${nodeLabelKey}=true en ${labeledNodes.join(', ')}`);
 
-    // 3. Label namespace (tsure.io/klared-<id>=true for k3access)
+    // 3. Label namespace (tsure.io/klared-<id>=true for k3access, skipping default/system)
     mark(2, 'running');
     const nsLabelKey = buildNamespaceLabelKey(tunnelId);
-    await runKubectl(
-      ['label', 'namespace', namespace, `${nsLabelKey}=true`, '--overwrite'],
-      { timeoutMs: 12_000 },
-    );
-    labeledNamespace = true;
-    mark(2, 'ok', `${nsLabelKey}=true en namespace ${namespace}`);
+    if (!isDefaultNamespace(namespace) && !isSystemNamespace(namespace)) {
+      await runKubectl(
+        ['label', 'namespace', namespace, `${nsLabelKey}=true`, '--overwrite'],
+        { timeoutMs: 12_000 },
+      );
+      labeledNamespace = true;
+      mark(2, 'ok', `${nsLabelKey}=true en namespace ${namespace}`);
+    } else {
+      mark(2, 'ok', `Namespace "${namespace}" sin label adicional`);
+    }
 
     // 4. Apply Secret + Deployment via stdin
     mark(3, 'running');
@@ -1383,13 +1369,20 @@ export async function deleteTunnel(params: {
     );
 
     mark(3, 'running');
-    await runKubectl(
-      ['label', 'namespace', tunnel.namespace, `${tunnel.namespaceLabelKey}-`],
-      { timeoutMs: 12_000 },
-    ).catch(() => {
-      // Namespace might not have the label if created manually
-    });
-    mark(3, 'ok', `Namespace ${tunnel.namespace} limpio`);
+    if (
+      !isDefaultNamespace(tunnel.namespace) &&
+      !isSystemNamespace(tunnel.namespace)
+    ) {
+      await runKubectl(
+        ['label', 'namespace', tunnel.namespace, `${tunnel.namespaceLabelKey}-`],
+        { timeoutMs: 12_000 },
+      ).catch(() => {
+        // Namespace might not have the label if created manually
+      });
+      mark(3, 'ok', `Namespace ${tunnel.namespace} limpio`);
+    } else {
+      mark(3, 'ok', `Namespace "${tunnel.namespace}" sin cambios`);
+    }
   } catch (err) {
     const runningIdx = steps.findIndex((s) => s.status === 'running');
     if (runningIdx >= 0) {
@@ -1505,28 +1498,80 @@ export async function scaleTunnelReplicas(params: {
   return newReplicas;
 }
 
-/**
- * Applies or clears an additional node label affinity expression on the tunnel Deployment
- * (e.g. "flotip=true") while preserving tsure.io/cloudflared-<id> and never modifying
- * external node labels. Uses zero-downtime rollout with rollback on failure.
- */
-export async function updateTunnelNodeLabelAffinity(params: {
+interface K8sSecretItem {
+  data?: {
+    token?: string;
+  };
+}
+
+export interface MigrateTunnelNamespaceParams {
   tunnel: TunnelInfo;
-  selector: string | null;
+  targetNamespace: string;
   allNodes: NodeAgentInfo[];
+  namespaces: NamespaceMeta[];
+  existingTunnels: TunnelInfo[];
   onProgress?: (steps: OperationStepLog[]) => void;
-}): Promise<{ appliedSelector: string | null; matchedAgents: string[] }> {
-  const { tunnel, allNodes, onProgress } = params;
-  const parsed = parseSingleNodeLabelSelector(params.selector);
-  if (!parsed.valid) {
-    throw new Error(parsed.error ?? 'Label de nodo inválido.');
+}
+
+export interface MigrateTunnelNamespaceResult {
+  sourceNamespace: string;
+  targetNamespace: string;
+  agents: string[];
+  replicas: number;
+}
+
+/**
+ * Moves a stateless cloudflared tunnel to another namespace (e.g. from default
+ * to a k3access-managed namespace like "flotip", or vice versa) with zero
+ * downtime: creates Secret + Deployment in target first, waits for /ready,
+ * and only then removes the old Deployment, Secret and source namespace label.
+ */
+export async function migrateTunnelNamespace(
+  params: MigrateTunnelNamespaceParams,
+): Promise<MigrateTunnelNamespaceResult> {
+  const { tunnel, allNodes, namespaces, existingTunnels, onProgress } = params;
+  const targetNamespace = params.targetNamespace.trim();
+
+  if (!targetNamespace) {
+    throw new Error('Debes indicar un namespace destino.');
+  }
+  if (targetNamespace === tunnel.namespace) {
+    throw new Error(`El túnel ya corre en el namespace "${targetNamespace}".`);
   }
 
-  const targetSelector = parsed.selector;
+  const targetNs = namespaces.find((ns) => ns.name === targetNamespace);
+  if (!targetNs) {
+    throw new Error(`El namespace "${targetNamespace}" no existe.`);
+  }
+  if (targetNs.isSystem) {
+    throw new Error(
+      `No se permite mover túneles al namespace del sistema "${targetNamespace}".`,
+    );
+  }
+  if (targetNs.phase !== 'Active') {
+    throw new Error(
+      `El namespace "${targetNamespace}" no está Active (${targetNs.phase}).`,
+    );
+  }
+  if (
+    existingTunnels.some(
+      (t) =>
+        t.namespace === targetNamespace &&
+        t.resourceName === tunnel.resourceName,
+    )
+  ) {
+    throw new Error(
+      `Ya existe "${tunnel.resourceName}" en el namespace "${targetNamespace}".`,
+    );
+  }
+
   const steps: OperationStepLog[] = [
-    { label: 'Validar nodos compatibles con el label', status: 'pending' },
-    { label: 'Actualizar nodeAffinity en el Deployment', status: 'pending' },
-    { label: 'Esperar rollout sin corte (/ready)', status: 'pending' },
+    { label: 'Validar compatibilidad con el namespace destino', status: 'pending' },
+    { label: 'Leer token del Secret origen (en memoria)', status: 'pending' },
+    { label: 'Preparar etiquetas de nodos y namespace destino', status: 'pending' },
+    { label: `Desplegar Secret + Deployment en "${targetNamespace}"`, status: 'pending' },
+    { label: 'Esperar /ready en destino (sin corte)', status: 'pending' },
+    { label: `Limpiar recursos y label en "${tunnel.namespace}"`, status: 'pending' },
   ];
 
   const emit = () => onProgress?.(steps.map((s) => ({ ...s })));
@@ -1543,178 +1588,252 @@ export async function updateTunnelNodeLabelAffinity(params: {
     emit();
   };
 
+  let token = '';
   const addedNodes: string[] = [];
-  let matchedAgentNames: string[] = [];
+  let labeledTargetNs = false;
+  let appliedTarget = false;
+
+  const rollbackTarget = async (): Promise<void> => {
+    if (appliedTarget) {
+      await runKubectl(
+        [
+          'delete',
+          'deployment',
+          tunnel.resourceName,
+          '-n',
+          targetNamespace,
+          '--ignore-not-found=true',
+        ],
+        { timeoutMs: 25_000, redact: token ? [token] : [] },
+      ).catch(() => {});
+      await runKubectl(
+        [
+          'delete',
+          'secret',
+          tunnel.resourceName,
+          '-n',
+          targetNamespace,
+          '--ignore-not-found=true',
+        ],
+        { timeoutMs: 15_000, redact: token ? [token] : [] },
+      ).catch(() => {});
+    }
+    if (labeledTargetNs) {
+      await runKubectl(
+        ['label', 'namespace', targetNamespace, `${tunnel.namespaceLabelKey}-`],
+        { timeoutMs: 12_000 },
+      ).catch(() => {});
+    }
+    for (const nodeName of addedNodes) {
+      await runKubectl(
+        ['label', 'node', nodeName, `${tunnel.nodeLabelKey}-`],
+        { timeoutMs: 12_000 },
+      ).catch(() => {});
+    }
+  };
 
   try {
+    // 1. Check agent compatibility with target namespace node-selector
     mark(0, 'running');
-    const eligibility = computeAgentEligibility(
-      allNodes,
-      tunnel.namespaceNodeSelector,
-    );
-    const eligibleNodes = eligibility
+    const eligibility = computeAgentEligibility(allNodes, targetNs.nodeSelector);
+    const eligibleNames = eligibility
       .filter((e) => e.eligible)
-      .map((e) => e.agent);
-
-    if (targetSelector && parsed.key) {
-      const matchingEligible = matchNodesForLabelAffinity(
-        targetSelector,
-        eligibleNodes,
+      .map((e) => e.agent.name)
+      .sort();
+    if (eligibleNames.length === 0) {
+      throw new Error(
+        `Ningún agente Ready es compatible con la afinidad del namespace "${targetNamespace}".`,
       );
-      if (matchingEligible.length === 0) {
-        throw new Error(
-          `Ningún agente Ready compatible con "${tunnel.namespace}" tiene el label "${targetSelector}".`,
-        );
-      }
-      matchedAgentNames = matchingEligible.map((n) => n.name).sort();
-
-      // Ensure at least one matching eligible node also has tsure.io/cloudflared-<id>
-      // so the pod will never become Pending due to an empty intersection.
-      const hasOverlap = matchingEligible.some((n) =>
-        tunnel.allowedAgents.includes(n.name),
-      );
-      if (!hasOverlap) {
-        for (const node of matchingEligible) {
-          await runKubectl(
-            ['label', 'node', node.name, `${tunnel.nodeLabelKey}=true`, '--overwrite'],
-            { timeoutMs: 12_000 },
-          );
-          addedNodes.push(node.name);
-        }
-      }
-      mark(
-        0,
-        'ok',
-        `${targetSelector} → ${matchedAgentNames.join(', ')}${addedNodes.length > 0 ? ' (+habilitados)' : ''}`,
-      );
-    } else {
-      matchedAgentNames = [...tunnel.allowedAgents];
-      mark(0, 'ok', 'Sin label adicional (solo agentes permitidos)');
     }
 
-    // Build matchExpressions cleanly
-    mark(1, 'running');
-    const matchExpressions: Array<
-      | { key: string; operator: 'Exists' }
-      | { key: string; operator: 'In'; values: string[] }
-    > = [{ key: tunnel.nodeLabelKey, operator: 'Exists' }];
-
-    if (targetSelector && parsed.key) {
-      if (parsed.value !== null) {
-        matchExpressions.push({
-          key: parsed.key,
-          operator: 'In',
-          values: [parsed.value],
-        });
-      } else {
-        matchExpressions.push({
-          key: parsed.key,
-          operator: 'Exists',
-        });
-      }
-    }
-
-    const patchOps = [
-      {
-        op: 'replace',
-        path: '/spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms/0/matchExpressions',
-        value: matchExpressions,
-      },
-    ];
-
-    await runKubectl(
-      [
-        'patch',
-        'deployment',
-        tunnel.resourceName,
-        '-n',
-        tunnel.namespace,
-        '--type=json',
-        '-p',
-        JSON.stringify(patchOps),
-      ],
-      { timeoutMs: 15_000 },
+    const overlap = tunnel.allowedAgents
+      .filter((a) => eligibleNames.includes(a))
+      .sort();
+    const nextAgents = overlap.length > 0 ? overlap : eligibleNames;
+    const agentsToAdd = nextAgents.filter(
+      (a) => !tunnel.allowedAgents.includes(a),
     );
+    const agentsToRemove = tunnel.allowedAgents.filter(
+      (a) => !nextAgents.includes(a),
+    );
+    const nextReplicas =
+      tunnel.replicas === 0
+        ? 0
+        : Math.max(1, Math.min(tunnel.replicas, nextAgents.length));
+
     mark(
-      1,
+      0,
       'ok',
-      targetSelector ? `Afinidad aplicada: ${targetSelector}` : 'Afinidad adicional eliminada',
+      `${tunnel.namespace} → ${targetNamespace} · agentes: ${nextAgents.join(', ')}`,
     );
 
-    mark(2, 'running');
-    if (tunnel.replicas > 0) {
-      try {
-        await runKubectl(
-          [
-            'rollout',
-            'status',
-            `deployment/${tunnel.resourceName}`,
-            '-n',
-            tunnel.namespace,
-            '--timeout=90s',
-          ],
-          {
-            timeoutMs: 95_000,
-            onStdout: (chunk) => {
-              const line = chunk.trim().split('\n').pop();
-              if (line) mark(2, 'running', line);
-            },
-          },
-        );
-        mark(2, 'ok', 'Túnel reprogramado y Ready');
-      } catch (rolloutErr) {
-        await runKubectl(
-          ['rollout', 'undo', `deployment/${tunnel.resourceName}`, '-n', tunnel.namespace],
-          { timeoutMs: 20_000 },
-        ).catch(() => {});
-        for (const nodeName of addedNodes) {
-          await runKubectl(['label', 'node', nodeName, `${tunnel.nodeLabelKey}-`], {
-            timeoutMs: 12_000,
-          }).catch(() => {});
-        }
-        mark(2, 'error', 'Rollout expirado/fallido — se ejecutó rollout undo');
-        throw rolloutErr;
-      }
-    } else {
-      mark(2, 'ok', 'Túnel pausado (se aplicará al reactivar)');
+    // 2. Read token from source Secret (in memory only, redacted)
+    mark(1, 'running');
+    const secretObj = await runKubectlJson<K8sSecretItem>(
+      ['get', 'secret', tunnel.resourceName, '-n', tunnel.namespace, '-o', 'json'],
+      { timeoutMs: 12_000 },
+    );
+    const encodedToken = secretObj.data?.token?.trim() ?? '';
+    if (!encodedToken) {
+      throw new Error(
+        `No se encontró el campo "token" en el Secret "${tunnel.resourceName}" de "${tunnel.namespace}".`,
+      );
     }
+    token = Buffer.from(encodedToken, 'base64').toString('utf8').trim();
+    if (!token) {
+      throw new Error(
+        `El token del Secret "${tunnel.resourceName}" está vacío.`,
+      );
+    }
+    mark(1, 'ok', 'Token leído de forma segura');
 
-    // Sync annotations (audit mirror)
-    const annotateArgs = [
-      'annotate',
-      `deployment/${tunnel.resourceName}`,
-      '-n',
-      tunnel.namespace,
-      targetSelector
-        ? `${NODE_LABEL_AFFINITY_ANNOTATION}=${targetSelector}`
-        : `${NODE_LABEL_AFFINITY_ANNOTATION}-`,
-      '--overwrite',
-    ];
-    await runKubectl(annotateArgs, { timeoutMs: 12_000 }).catch(() => {});
+    // 3. Label any new compatible nodes + target namespace (skipping default/system)
+    mark(2, 'running');
+    for (const nodeName of agentsToAdd) {
+      await runKubectl(
+        ['label', 'node', nodeName, `${tunnel.nodeLabelKey}=true`, '--overwrite'],
+        { timeoutMs: 12_000, redact: [token] },
+      );
+      addedNodes.push(nodeName);
+    }
+    if (!targetNs.isDefault && !targetNs.isSystem) {
+      await runKubectl(
+        [
+          'label',
+          'namespace',
+          targetNamespace,
+          `${tunnel.namespaceLabelKey}=true`,
+          '--overwrite',
+        ],
+        { timeoutMs: 12_000, redact: [token] },
+      );
+      labeledTargetNs = true;
+    }
+    mark(
+      2,
+      'ok',
+      labeledTargetNs
+        ? `${tunnel.namespaceLabelKey}=true en ${targetNamespace}`
+        : `Destino "${targetNamespace}" listo`,
+    );
 
-    if (addedNodes.length > 0) {
-      const updatedAgents = [...new Set([...tunnel.allowedAgents, ...addedNodes])].sort();
+    // 4. Apply Secret + Deployment in target namespace via stdin
+    mark(3, 'running');
+    const bundleYaml = buildTunnelBundleYaml({
+      name: tunnel.name,
+      namespace: targetNamespace,
+      tunnelId: tunnel.tunnelId,
+      agents: nextAgents,
+      replicas: nextReplicas,
+      imageVersion: tunnel.imageVersion,
+      protocol: tunnel.protocol,
+      description: tunnel.description,
+      token,
+    });
+    await runKubectl(['apply', '-f', '-'], {
+      stdin: bundleYaml,
+      redact: [token],
+      timeoutMs: 25_000,
+    });
+    appliedTarget = true;
+
+    if (nextReplicas === 0 && tunnel.desiredReplicasWhenPaused > 0) {
       await runKubectl(
         [
           'annotate',
           `deployment/${tunnel.resourceName}`,
           '-n',
-          tunnel.namespace,
-          `${AGENTS_ANNOTATION}=${updatedAgents.join(',')}`,
+          targetNamespace,
+          `${DESIRED_REPLICAS_ANNOTATION}=${Math.min(tunnel.desiredReplicasWhenPaused, nextAgents.length)}`,
           '--overwrite',
         ],
+        { timeoutMs: 12_000, redact: [token] },
+      ).catch(() => {});
+    }
+    mark(3, 'ok', `Aplicado en ${targetNamespace}`);
+
+    // 5. Wait for rollout status in target namespace (zero downtime!)
+    mark(4, 'running');
+    if (nextReplicas > 0) {
+      await runKubectl(
+        [
+          'rollout',
+          'status',
+          `deployment/${tunnel.resourceName}`,
+          '-n',
+          targetNamespace,
+          '--timeout=90s',
+        ],
+        {
+          timeoutMs: 95_000,
+          redact: [token],
+          onStdout: (chunk) => {
+            const line = chunk.trim().split('\n').pop();
+            if (line) mark(4, 'running', line);
+          },
+        },
+      );
+      mark(4, 'ok', `Túnel Ready en "${targetNamespace}"`);
+    } else {
+      mark(4, 'ok', 'Túnel pausado (0 réplicas)');
+    }
+
+    // 6. Clean up old Deployment, Secret, source namespace label & incompatible node labels
+    mark(5, 'running');
+    await runKubectl(
+      [
+        'delete',
+        'deployment',
+        tunnel.resourceName,
+        '-n',
+        tunnel.namespace,
+        '--ignore-not-found=true',
+      ],
+      { timeoutMs: 25_000, redact: [token] },
+    );
+    await runKubectl(
+      [
+        'delete',
+        'secret',
+        tunnel.resourceName,
+        '-n',
+        tunnel.namespace,
+        '--ignore-not-found=true',
+      ],
+      { timeoutMs: 15_000, redact: [token] },
+    );
+    if (
+      !isDefaultNamespace(tunnel.namespace) &&
+      !isSystemNamespace(tunnel.namespace)
+    ) {
+      await runKubectl(
+        ['label', 'namespace', tunnel.namespace, `${tunnel.namespaceLabelKey}-`],
         { timeoutMs: 12_000 },
       ).catch(() => {});
     }
+    for (const nodeName of agentsToRemove) {
+      await runKubectl(
+        ['label', 'node', nodeName, `${tunnel.nodeLabelKey}-`],
+        { timeoutMs: 12_000 },
+      ).catch(() => {});
+    }
+    mark(5, 'ok', `Origen "${tunnel.namespace}" limpiado`);
 
     return {
-      appliedSelector: targetSelector,
-      matchedAgents: matchedAgentNames,
+      sourceNamespace: tunnel.namespace,
+      targetNamespace,
+      agents: nextAgents,
+      replicas: nextReplicas,
     };
   } catch (err) {
+    await rollbackTarget();
     const runningIdx = steps.findIndex((s) => s.status === 'running');
     if (runningIdx >= 0) {
-      mark(runningIdx, 'error', err instanceof Error ? err.message : String(err));
+      mark(
+        runningIdx,
+        'error',
+        `Error — destino revertido, origen "${tunnel.namespace}" intacto`,
+      );
     }
     throw err;
   }

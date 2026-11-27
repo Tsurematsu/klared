@@ -4,16 +4,17 @@ import {
   buildNamespaceLabelKey,
   buildNodeLabelKey,
   buildResourceName,
-  collectClusterNodeLabels,
+  buildZeroTrustUrlEntries,
   computeAgentEligibility,
+  detectZeroTrustServiceType,
   extractTunnelProtocol,
   extractTunnelToken,
-  formatCompactNodeLabel,
   formatNodeSelectorDisplay,
+  getSelectableNamespaces,
+  isDefaultNamespace,
+  isSystemNamespace,
   maskTokenForDisplay,
-  matchNodesForLabelAffinity,
   parseNodeSelector,
-  parseSingleNodeLabelSelector,
   redactSecrets,
   summarizeCloudflaredLogDiagnostic,
   validateImageVersion,
@@ -21,7 +22,11 @@ import {
   validateTunnelName,
   validateTunnelProtocol,
 } from '../src/utils/validation.js';
-import type { NodeAgentInfo } from '../src/types/k8s.js';
+import type {
+  NamespaceMeta,
+  NodeAgentInfo,
+  ServiceEndpointInfo,
+} from '../src/types/k8s.js';
 
 const MOCK_NODES: NodeAgentInfo[] = [
   {
@@ -253,78 +258,129 @@ describe('Protocolo de túnel y diagnóstico de logs cloudflared', () => {
   });
 });
 
-describe('Labels de nodo del clúster (afinidad y descubrimiento)', () => {
-  it('parsea, formatea y filtra labels de nodo correctamente', () => {
-    assert.deepEqual(parseSingleNodeLabelSelector('flotip=true'), {
-      valid: true,
-      selector: 'flotip=true',
-      key: 'flotip',
-      value: 'true',
-    });
-    assert.deepEqual(parseSingleNodeLabelSelector('flotip'), {
-      valid: true,
-      selector: 'flotip',
-      key: 'flotip',
-      value: null,
-    });
-    assert.equal(parseSingleNodeLabelSelector('bad key=1').valid, false);
-
-    assert.equal(formatCompactNodeLabel(null), 'ninguno');
-    assert.equal(formatCompactNodeLabel('flotip=true'), 'flotip');
-    assert.equal(formatCompactNodeLabel('tsure.io/flotip=true'), 'flotip');
-    assert.equal(formatCompactNodeLabel('tsure.io/tier=edge'), 'tier=edge');
-  });
-
-  it('descubre labels custom primero, excluye control-plane y tsure.io/cloudflared-*', () => {
-    const nodesWithCustom: NodeAgentInfo[] = [
+describe('Namespaces seleccionables (k3access + default, sin sistema)', () => {
+  it('ordena namespaces k3access primero, permite default y excluye sistema', () => {
+    const namespaces: NamespaceMeta[] = [
       {
-        ...MOCK_NODES[0]!,
-        labels: {
-          ...MOCK_NODES[0]!.labels,
-          'only-server': 'true',
-        },
+        name: 'kube-system',
+        phase: 'Active',
+        isSystem: true,
+        isDefault: false,
+        isProtected: true,
+        isManaged: false,
+        description: '',
+        nodeSelector: null,
+        nodeSelectorSource: null,
+        labels: {},
+        toolLabels: [],
+        klaredIds: [],
       },
       {
-        ...MOCK_NODES[1]!,
-        labels: {
-          ...MOCK_NODES[1]!.labels,
-          flotip: 'true',
-          'tsure.io/cloudflared-a1b2c3': 'true',
-        },
-        cloudflaredIds: ['a1b2c3'],
+        name: 'default',
+        phase: 'Active',
+        isSystem: false,
+        isDefault: true,
+        isProtected: true,
+        isManaged: false,
+        description: '',
+        nodeSelector: null,
+        nodeSelectorSource: null,
+        labels: {},
+        toolLabels: [],
+        klaredIds: [],
       },
       {
-        ...MOCK_NODES[2]!,
-        labels: {
-          ...MOCK_NODES[2]!.labels,
-          tier: 'edge',
-        },
+        name: 'flotip',
+        phase: 'Active',
+        isSystem: false,
+        isDefault: false,
+        isProtected: false,
+        isManaged: true,
+        description: 'Aplicacion empresarial',
+        nodeSelector: null,
+        nodeSelectorSource: null,
+        labels: { 'tsure.io/managed': 'true', 'tsure.io/kpg': 'true' },
+        toolLabels: ['kpg'],
+        klaredIds: [],
+      },
+      {
+        name: 'extra-app',
+        phase: 'Active',
+        isSystem: false,
+        isDefault: false,
+        isProtected: false,
+        isManaged: false,
+        description: '',
+        nodeSelector: null,
+        nodeSelectorSource: null,
+        labels: {},
+        toolLabels: [],
+        klaredIds: [],
       },
     ];
 
-    const discovered = collectClusterNodeLabels(nodesWithCustom);
-    assert.equal(
-      discovered.some((l) => l.key === 'only-server'),
-      false,
-    );
-    assert.equal(
-      discovered.some((l) => l.key === 'tsure.io/cloudflared-a1b2c3'),
-      false,
-    );
+    assert.equal(isSystemNamespace('kube-system'), true);
+    assert.equal(isSystemNamespace('default'), false);
+    assert.equal(isDefaultNamespace('default'), true);
 
-    // Custom labels appear before system labels
-    const customLabels = discovered.filter((l) => !l.isSystem);
+    const selectable = getSelectableNamespaces(namespaces);
     assert.deepEqual(
-      customLabels.map((l) => l.selector),
-      ['flotip=true', 'tier=edge'],
+      selectable.map((ns) => ns.name),
+      ['flotip', 'extra-app', 'default'],
     );
-    assert.equal(customLabels[0]?.shortLabel, 'flotip');
-    assert.deepEqual(customLabels[0]?.readyNodes, ['k3s-agent1']);
+  });
+});
 
-    const matched = matchNodesForLabelAffinity('flotip=true', nodesWithCustom);
-    assert.deepEqual(
-      matched.map((n) => n.name),
-      ['k3s-agent1'],
+describe('Asistente de URLs para Cloudflare Zero Trust', () => {
+  it('detecta tipo Zero Trust (HTTP/HTTPS/TCP/SSH/RDP) según puerto o nombre', () => {
+    assert.equal(detectZeroTrustServiceType(80, 'http'), 'HTTP');
+    assert.equal(detectZeroTrustServiceType(3000), 'HTTP');
+    assert.equal(detectZeroTrustServiceType(443), 'HTTPS');
+    assert.equal(detectZeroTrustServiceType(8443), 'HTTPS');
+    assert.equal(detectZeroTrustServiceType(5432, 'postgresql'), 'TCP');
+    assert.equal(detectZeroTrustServiceType(6379), 'TCP');
+    assert.equal(detectZeroTrustServiceType(22), 'SSH');
+    assert.equal(detectZeroTrustServiceType(3389), 'RDP');
+  });
+
+  it('genera DNS corto para el mismo namespace y FQDN para otros namespaces', () => {
+    const services: ServiceEndpointInfo[] = [
+      {
+        name: 'flotip-rw',
+        namespace: 'flotip',
+        type: 'ClusterIP',
+        clusterIp: '10.43.221.245',
+        ports: [{ port: 5432, protocol: 'TCP', name: 'postgresql' }],
+        suggestedUrls: ['tcp://flotip-rw:5432'],
+      },
+      {
+        name: 'web',
+        namespace: 'default',
+        type: 'ClusterIP',
+        clusterIp: '10.43.10.20',
+        ports: [
+          { port: 80, protocol: 'TCP', name: 'http' },
+          { port: 53, protocol: 'UDP', name: 'dns' },
+        ],
+        suggestedUrls: ['http://web:80'],
+      },
+    ];
+
+    const fromFlotip = buildZeroTrustUrlEntries(services, 'flotip');
+    assert.equal(fromFlotip.length, 2); // UDP port excluded
+    // Same-namespace service appears first with short DNS
+    assert.equal(fromFlotip[0]?.serviceName, 'flotip-rw');
+    assert.equal(fromFlotip[0]?.sameNamespace, true);
+    assert.equal(fromFlotip[0]?.ztType, 'TCP');
+    assert.equal(fromFlotip[0]?.recommendedTarget, 'flotip-rw:5432');
+    assert.equal(fromFlotip[0]?.fullUrl, 'tcp://flotip-rw:5432');
+    // Other-namespace service uses FQDN
+    assert.equal(fromFlotip[1]?.serviceName, 'web');
+    assert.equal(fromFlotip[1]?.sameNamespace, false);
+    assert.equal(fromFlotip[1]?.ztType, 'HTTP');
+    assert.equal(
+      fromFlotip[1]?.recommendedTarget,
+      'web.default.svc.cluster.local:80',
     );
   });
 });

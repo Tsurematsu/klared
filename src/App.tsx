@@ -8,14 +8,11 @@ import type {
 import { runPreFlight } from './services/preflight.js';
 import {
   getClusterSnapshot,
+  migrateTunnelNamespace,
   moveTunnelToAgent,
   scaleTunnelReplicas,
-  updateTunnelNodeLabelAffinity,
 } from './services/tunnels.js';
-import {
-  collectClusterNodeLabels,
-  formatCompactNodeLabel,
-} from './utils/validation.js';
+import { getSelectableNamespaces } from './utils/validation.js';
 import { PreFlightScreen } from './components/PreFlightScreen.js';
 import { Header } from './components/Header.js';
 import {
@@ -29,10 +26,10 @@ import { CreateTunnelModal } from './components/CreateTunnelModal.js';
 import { InspectTunnelModal } from './components/InspectTunnelModal.js';
 import { EditAssignmentModal } from './components/EditAssignmentModal.js';
 import { RotateTokenModal } from './components/RotateTokenModal.js';
-import { CopyUrlModal } from './components/CopyUrlModal.js';
 import { DeleteTunnelModal } from './components/DeleteTunnelModal.js';
 import { AgentsAuditModal } from './components/AgentsAuditModal.js';
-import { NodeLabelsModal } from './components/NodeLabelsModal.js';
+import { NamespacesModal } from './components/NamespacesModal.js';
+import { ZeroTrustUrlsModal } from './components/ZeroTrustUrlsModal.js';
 
 type ActiveModal =
   | 'none'
@@ -40,10 +37,10 @@ type ActiveModal =
   | 'inspect'
   | 'edit'
   | 'rotate'
-  | 'copy'
+  | 'zerotrust'
   | 'delete'
   | 'agents'
-  | 'labels';
+  | 'namespaces';
 
 const REFRESH_INTERVAL_MS = 5_000;
 
@@ -78,7 +75,7 @@ export const App: React.FC = () => {
   // Quick panel draft values for the selected tunnel
   const [draftMoveTarget, setDraftMoveTarget] = useState<string | null>(null);
   const [draftReplicas, setDraftReplicas] = useState<number>(1);
-  const [draftLabel, setDraftLabel] = useState<string | null>(null);
+  const [draftNamespace, setDraftNamespace] = useState<string>('');
 
   const isRefreshingRef = useRef(false);
 
@@ -149,6 +146,7 @@ export const App: React.FC = () => {
   }, [phase, modal, busyAction, refreshCluster]);
 
   const tunnels = snapshot?.tunnels ?? [];
+  const clusterServices = snapshot?.services ?? [];
   const nodes = snapshot?.nodes ?? preFlightData?.nodes ?? [];
   const agents = snapshot?.agents ?? preFlightData?.agents ?? [];
   const namespaces = snapshot?.namespaces ?? preFlightData?.namespaces ?? [];
@@ -178,7 +176,6 @@ export const App: React.FC = () => {
       const n = nodes.find((node) => node.name === name);
       return Boolean(n && n.ready && !n.unschedulable && !n.isControlPlane);
     });
-    // Put currently running agent(s) first for predictable starting position
     return [...readyAllowed].sort((a, b) => {
       const aRunning = selectedTunnel.runningAgents.includes(a) ? 0 : 1;
       const bRunning = selectedTunnel.runningAgents.includes(b) ? 0 : 1;
@@ -187,44 +184,39 @@ export const App: React.FC = () => {
     });
   }, [selectedTunnel, nodes]);
 
-  // Label options for the Label quick control (ninguno + custom cluster node labels + active label)
-  const panelLabelOptions = useMemo(() => {
-    const discovered = collectClusterNodeLabels(nodes);
-    const custom = discovered.filter((opt) => !opt.isSystem);
-    const entries: Array<{ selector: string | null; shortLabel: string }> = [
-      { selector: null, shortLabel: 'ninguno' },
-      ...custom.map((opt) => ({
-        selector: opt.selector,
-        shortLabel: opt.shortLabel,
-      })),
-    ];
-
-    const activeExtra = selectedTunnel?.extraNodeLabel ?? null;
-    if (activeExtra && !entries.some((e) => e.selector === activeExtra)) {
-      entries.push({
-        selector: activeExtra,
-        shortLabel: formatCompactNodeLabel(activeExtra),
-      });
+  // Selectable namespaces (k3access-managed + user + default, excluding system)
+  const selectableNamespaces = useMemo(() => {
+    const list = getSelectableNamespaces(namespaces);
+    if (
+      selectedTunnel &&
+      !list.some((ns) => ns.name === selectedTunnel.namespace)
+    ) {
+      const currentMeta = namespaces.find(
+        (ns) => ns.name === selectedTunnel.namespace,
+      );
+      if (currentMeta) {
+        return [currentMeta, ...list];
+      }
     }
-    return entries;
-  }, [nodes, selectedTunnel?.extraNodeLabel]);
+    return list;
+  }, [namespaces, selectedTunnel]);
 
   const resetPanelDrafts = useCallback(() => {
     if (!selectedTunnel) {
       setDraftMoveTarget(null);
       setDraftReplicas(1);
-      setDraftLabel(null);
+      setDraftNamespace('');
       return;
     }
     setDraftMoveTarget(
       selectedTunnel.runningAgents[0] ?? moveOptions[0] ?? null,
     );
     setDraftReplicas(selectedTunnel.replicas);
-    setDraftLabel(selectedTunnel.extraNodeLabel);
+    setDraftNamespace(selectedTunnel.namespace);
   }, [selectedTunnel, moveOptions]);
 
   const selectedTunnelKey = selectedTunnel
-    ? `${selectedTunnel.namespace}/${selectedTunnel.resourceName}:${selectedTunnel.runningAgents.join(',')}:${selectedTunnel.replicas}:${selectedTunnel.extraNodeLabel ?? ''}:${selectedTunnel.allowedAgents.join(',')}`
+    ? `${selectedTunnel.namespace}/${selectedTunnel.resourceName}:${selectedTunnel.runningAgents.join(',')}:${selectedTunnel.replicas}:${selectedTunnel.allowedAgents.join(',')}`
     : '';
 
   const prevTunnelKeyRef = useRef<string | null>(null);
@@ -246,6 +238,17 @@ export const App: React.FC = () => {
       ? draftMoveTarget
       : (selectedTunnel?.runningAgents[0] ?? moveOptions[0] ?? null);
 
+  const currentDraftNs =
+    draftNamespace || selectedTunnel?.namespace || '';
+  const currentDraftNsMeta = selectableNamespaces.find(
+    (ns) => ns.name === currentDraftNs,
+  );
+  const draftNamespaceBadge = currentDraftNsMeta?.isManaged
+    ? 'k3access'
+    : currentDraftNsMeta?.isDefault
+      ? 'default'
+      : null;
+
   const moveDirty = Boolean(
     selectedTunnel &&
       selectedTunnel.replicas > 0 &&
@@ -257,15 +260,11 @@ export const App: React.FC = () => {
       draftReplicas >= 1 &&
       draftReplicas !== selectedTunnel.replicas,
   );
-  const labelDirty = Boolean(
-    selectedTunnel && draftLabel !== selectedTunnel.extraNodeLabel,
+  const namespaceDirty = Boolean(
+    selectedTunnel &&
+      currentDraftNs &&
+      currentDraftNs !== selectedTunnel.namespace,
   );
-
-  const currentLabelEntry =
-    panelLabelOptions.find((o) => o.selector === draftLabel) ?? {
-      selector: draftLabel,
-      shortLabel: formatCompactNodeLabel(draftLabel),
-    };
 
   const panelState: QuickPanelState | null = selectedTunnel
     ? {
@@ -276,10 +275,10 @@ export const App: React.FC = () => {
         draftReplicas,
         maxReplicas,
         replicasDirty,
-        draftLabel,
-        draftLabelShort: currentLabelEntry.shortLabel,
-        labelOptionsCount: panelLabelOptions.length,
-        labelDirty,
+        draftNamespace: currentDraftNs,
+        draftNamespaceBadge,
+        namespaceOptionsCount: selectableNamespaces.length,
+        namespaceDirty,
         busyText,
       }
     : null;
@@ -341,7 +340,15 @@ export const App: React.FC = () => {
         setBusyAction(false);
         setBusyText(null);
       });
-  }, [selectedTunnel, busyAction, moveOptions.length, currentMoveTarget, nodes, showToast, refreshCluster]);
+  }, [
+    selectedTunnel,
+    busyAction,
+    moveOptions.length,
+    currentMoveTarget,
+    nodes,
+    showToast,
+    refreshCluster,
+  ]);
 
   const applyQuickReplicas = useCallback(() => {
     if (!selectedTunnel || busyAction) return;
@@ -359,7 +366,9 @@ export const App: React.FC = () => {
 
     const targetCount = draftReplicas;
     setBusyAction(true);
-    setBusyText(`Escalando "${selectedTunnel.name}" a ${targetCount} réplica${targetCount === 1 ? '' : 's'}...`);
+    setBusyText(
+      `Escalando "${selectedTunnel.name}" a ${targetCount} réplica${targetCount === 1 ? '' : 's'}...`,
+    );
     showToast(
       'info',
       `Escalando "${selectedTunnel.name}" a ${targetCount} réplica${targetCount === 1 ? '' : 's'}...`,
@@ -384,46 +393,37 @@ export const App: React.FC = () => {
       });
   }, [selectedTunnel, busyAction, draftReplicas, showToast, refreshCluster]);
 
-  const applyQuickLabel = useCallback(() => {
+  const applyQuickNamespace = useCallback(() => {
     if (!selectedTunnel || busyAction) return;
-    if (draftLabel === selectedTunnel.extraNodeLabel) {
+    if (!currentDraftNs || currentDraftNs === selectedTunnel.namespace) {
       showToast(
         'info',
-        'Sin cambios en label. Usa ←/→ para cambiar o pulsa (l) para ver todos.',
+        'Sin cambios de namespace. Usa ←/→ para cambiar o pulsa (l) para ver todos.',
       );
       return;
     }
 
-    const targetLabel = draftLabel;
+    const targetNs = currentDraftNs;
     setBusyAction(true);
     setBusyText(
-      targetLabel
-        ? `Aplicando label "${formatCompactNodeLabel(targetLabel)}" en "${selectedTunnel.name}"...`
-        : `Quitando afinidad por label en "${selectedTunnel.name}"...`,
+      `Moviendo "${selectedTunnel.name}" (${selectedTunnel.namespace} → ${targetNs}) sin corte...`,
     );
     showToast(
       'info',
-      targetLabel
-        ? `Aplicando afinidad ${targetLabel} en "${selectedTunnel.name}"...`
-        : `Quitando afinidad por label en "${selectedTunnel.name}"...`,
+      `Moviendo "${selectedTunnel.name}" al namespace "${targetNs}"...`,
     );
-    void updateTunnelNodeLabelAffinity({
+    void migrateTunnelNamespace({
       tunnel: selectedTunnel,
-      selector: targetLabel,
+      targetNamespace: targetNs,
       allNodes: nodes,
+      namespaces,
+      existingTunnels: tunnels,
     })
       .then((res) => {
-        if (res.appliedSelector) {
-          showToast(
-            'success',
-            `Label "${formatCompactNodeLabel(res.appliedSelector)}" aplicado a "${selectedTunnel.name}" (${res.matchedAgents.join(', ')}).`,
-          );
-        } else {
-          showToast(
-            'success',
-            `Afinidad por label eliminada de "${selectedTunnel.name}".`,
-          );
-        }
+        showToast(
+          'success',
+          `Túnel "${selectedTunnel.name}" movido a "${res.targetNamespace}" sin corte.`,
+        );
         return refreshCluster();
       })
       .catch((err) => {
@@ -433,20 +433,27 @@ export const App: React.FC = () => {
         setBusyAction(false);
         setBusyText(null);
       });
-  }, [selectedTunnel, busyAction, draftLabel, nodes, showToast, refreshCluster]);
+  }, [
+    selectedTunnel,
+    busyAction,
+    currentDraftNs,
+    nodes,
+    namespaces,
+    tunnels,
+    showToast,
+    refreshCluster,
+  ]);
 
   useInput(
     (input, key) => {
       if (busyAction) return;
       const lower = input.toLowerCase();
 
-      // Always allow Q to exit from dashboard
       if (lower === 'q') {
         exit();
         return;
       }
 
-      // Esc backs out from panel to table; on table exits app
       if (key.escape) {
         if (focusArea === 'panel') {
           resetPanelDrafts();
@@ -457,7 +464,6 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Global dashboard shortcuts
       if (lower === 'n') {
         setReturnToInspect(false);
         setModal('create');
@@ -466,7 +472,13 @@ export const App: React.FC = () => {
 
       if (lower === 'l') {
         setReturnToInspect(false);
-        setModal('labels');
+        setModal('namespaces');
+        return;
+      }
+
+      if (lower === 'z') {
+        setReturnToInspect(false);
+        setModal('zerotrust');
         return;
       }
 
@@ -476,7 +488,6 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Allow Audit directly when cluster has 0 tunnels (no Inspect available yet)
       if (lower === 'a' && !selectedTunnel) {
         setReturnToInspect(false);
         setModal('agents');
@@ -491,27 +502,8 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Tab navigation between Table and Quick Control Panel
       if (key.tab) {
-        if (key.shift) {
-          if (focusArea === 'table') {
-            setFocusArea('panel');
-            setPanelIndex(QUICK_PANEL_ITEMS.length - 1);
-          } else if (panelIndex > 0) {
-            setPanelIndex((prev) => prev - 1);
-          } else {
-            setFocusArea('table');
-          }
-        } else {
-          if (focusArea === 'table') {
-            setFocusArea('panel');
-            setPanelIndex(0);
-          } else if (panelIndex < QUICK_PANEL_ITEMS.length - 1) {
-            setPanelIndex((prev) => prev + 1);
-          } else {
-            setFocusArea('table');
-          }
-        }
+        setFocusArea((prev) => (prev === 'table' ? 'panel' : 'table'));
         return;
       }
 
@@ -534,7 +526,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Focus is on the Quick Control Panel
+      // Focus is on the Quick Control Panel (vertical list)
       if (key.upArrow || lower === 'k') {
         setPanelIndex((prev) => Math.max(0, prev - 1));
         return;
@@ -548,7 +540,11 @@ export const App: React.FC = () => {
 
       if (key.leftArrow || key.rightArrow) {
         const delta = key.rightArrow ? 1 : -1;
-        if (activePanelItem === 'move' && moveOptions.length > 0 && selectedTunnel.replicas > 0) {
+        if (
+          activePanelItem === 'move' &&
+          moveOptions.length > 0 &&
+          selectedTunnel.replicas > 0
+        ) {
           const curIdx = currentMoveTarget
             ? Math.max(0, moveOptions.indexOf(currentMoveTarget))
             : 0;
@@ -565,15 +561,18 @@ export const App: React.FC = () => {
           });
           return;
         }
-        if (activePanelItem === 'label' && panelLabelOptions.length > 0) {
+        if (
+          activePanelItem === 'namespace' &&
+          selectableNamespaces.length > 0
+        ) {
           const curIdx = Math.max(
             0,
-            panelLabelOptions.findIndex((o) => o.selector === draftLabel),
+            selectableNamespaces.findIndex((ns) => ns.name === currentDraftNs),
           );
           const nextIdx =
-            (curIdx + delta + panelLabelOptions.length) %
-            panelLabelOptions.length;
-          setDraftLabel(panelLabelOptions[nextIdx]?.selector ?? null);
+            (curIdx + delta + selectableNamespaces.length) %
+            selectableNamespaces.length;
+          setDraftNamespace(selectableNamespaces[nextIdx]?.name ?? '');
           return;
         }
         return;
@@ -593,8 +592,8 @@ export const App: React.FC = () => {
           applyQuickReplicas();
           return;
         }
-        if (activePanelItem === 'label') {
-          applyQuickLabel();
+        if (activePanelItem === 'namespace') {
+          applyQuickNamespace();
           return;
         }
       }
@@ -620,7 +619,8 @@ export const App: React.FC = () => {
   const dashboardShortcuts: FooterShortcut[] = [
     { key: 'n', label: 'Nuevo', color: 'green' },
     { key: 'i', label: 'Inspección', color: 'cyan', disabled: !hasTunnel },
-    { key: 'l', label: 'Labels', color: 'yellow' },
+    { key: 'z', label: 'ZeroTrust', color: 'green' },
+    { key: 'l', label: 'Namespaces', color: 'yellow' },
     {
       key: 'Tab',
       label: focusArea === 'panel' ? 'Tabla' : 'Panel',
@@ -659,6 +659,7 @@ export const App: React.FC = () => {
         <>
           <DashboardScreen
             tunnels={tunnels}
+            clusterServices={clusterServices}
             selectedIndex={selectedIndex}
             focusArea={focusArea}
             panelState={panelState}
@@ -705,7 +706,7 @@ export const App: React.FC = () => {
           }}
           onOpenCopyUrl={() => {
             setReturnToInspect(true);
-            setModal('copy');
+            setModal('zerotrust');
           }}
           onOpenDelete={() => {
             setReturnToInspect(true);
@@ -727,11 +728,13 @@ export const App: React.FC = () => {
         />
       ) : null}
 
-      {modal === 'labels' ? (
-        <NodeLabelsModal
+      {modal === 'namespaces' ? (
+        <NamespacesModal
+          namespaces={namespaces}
           nodes={nodes}
+          tunnels={tunnels}
           selectedTunnel={selectedTunnel}
-          onApplied={(msg) => {
+          onMigrated={(msg) => {
             setModal('none');
             showToast('success', msg);
             void refreshCluster();
@@ -752,11 +755,11 @@ export const App: React.FC = () => {
         />
       ) : null}
 
-      {modal === 'copy' && selectedTunnel ? (
-        <CopyUrlModal
-          tunnel={selectedTunnel}
+      {modal === 'zerotrust' ? (
+        <ZeroTrustUrlsModal
+          services={clusterServices}
+          selectedTunnel={selectedTunnel}
           onCopied={(msg) => {
-            closeSubModal();
             showToast('success', msg);
           }}
           onClose={() => closeSubModal()}

@@ -14,6 +14,7 @@ import {
   DEFAULT_TUNNEL_PROTOCOL,
   extractTunnelToken,
   formatNodeSelectorDisplay,
+  getSelectableNamespaces,
   TUNNEL_PROTOCOLS,
   validateImageVersion,
   validateTunnelName,
@@ -53,10 +54,14 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
 }) => {
   const [showSystemNs, setShowSystemNs] = useState(false);
   const visibleNamespaces = useMemo(() => {
-    const filtered = showSystemNs
-      ? namespaces
-      : namespaces.filter((n) => !n.isProtected);
-    return filtered.length > 0 ? filtered : namespaces;
+    const selectable = getSelectableNamespaces(namespaces);
+    if (!showSystemNs) {
+      return selectable.length > 0 ? selectable : namespaces;
+    }
+    const system = namespaces
+      .filter((n) => n.isSystem)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return [...selectable, ...system];
   }, [namespaces, showSystemNs]);
 
   const [name, setName] = useState('');
@@ -485,7 +490,14 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
         </Text>
         <Text bold color="cyan">
           ◀ {currentNs?.name ?? '(ninguno)'}
-          {currentNs?.isProtected ? ' [sys]' : ''} ▶
+          {currentNs?.isManaged
+            ? ' [k3access]'
+            : currentNs?.isDefault
+              ? ' [default]'
+              : currentNs?.isSystem
+                ? ' [sys]'
+                : ''}{' '}
+          ▶
         </Text>
         <Text dimColor> (y: {showSystemNs ? 'ocultar' : 'ver'} sys)</Text>
         {currentNs?.nodeSelector ? (

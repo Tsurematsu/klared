@@ -2,10 +2,14 @@ import type { NamespaceMeta, NodeAgentInfo } from '../types/k8s.js';
 import {
   CLOUDFLARED_NODE_LABEL_PREFIX,
   DESCRIPTION_ANNOTATION,
+  isDefaultNamespace,
   isProtectedNamespace,
+  isSystemNamespace,
   K8S_NODE_SELECTOR_ANNOTATION,
   KLARED_NS_LABEL_PREFIX,
+  TSURE_MANAGED_LABEL_KEY,
   TSURE_NODE_SELECTOR_ANNOTATION,
+  TSURE_PREFIX,
 } from '../utils/validation.js';
 import { runKubectlJson } from './kubectl.js';
 
@@ -148,14 +152,29 @@ export async function listNamespacesMeta(): Promise<NamespaceMeta[]> {
       .filter(Boolean)
       .sort();
 
+    const toolLabels = Object.entries(labels)
+      .filter(
+        ([k, v]) =>
+          k.startsWith(TSURE_PREFIX) &&
+          k !== TSURE_MANAGED_LABEL_KEY &&
+          v.toLowerCase() !== 'false',
+      )
+      .map(([k]) => k.slice(TSURE_PREFIX.length))
+      .filter(Boolean)
+      .sort();
+
     return {
       name,
       phase: item.status?.phase ?? 'Active',
+      isSystem: isSystemNamespace(name),
+      isDefault: isDefaultNamespace(name),
       isProtected: isProtectedNamespace(name),
+      isManaged: labels[TSURE_MANAGED_LABEL_KEY] === 'true',
       description: annotations[DESCRIPTION_ANNOTATION] ?? '',
       nodeSelector,
       nodeSelectorSource,
       labels,
+      toolLabels,
       klaredIds,
     };
   });

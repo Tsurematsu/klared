@@ -19,30 +19,41 @@ export interface AgentEligibility {
   disabledReason: string | null;
 }
 
-export interface NodeLabelOption {
-  key: string;
-  value: string;
-  /** Normalized selector: "key=value" (or "key" when value is empty) */
-  selector: string;
-  /** Short label for compact UI panels (e.g. "flotip") */
-  shortLabel: string;
-  /** Worker agent names carrying this label */
-  nodes: string[];
-  /** Ready & schedulable worker agent names carrying this label */
-  readyNodes: string[];
-  /** True for standard Kubernetes/k3s builtin node labels */
-  isSystem: boolean;
-}
-
 export interface NamespaceMeta {
   name: string;
   phase: string;
+  isSystem: boolean;
+  isDefault: boolean;
   isProtected: boolean;
+  isManaged: boolean;
   description: string;
   nodeSelector: string | null;
   nodeSelectorSource: 'k8s+tsure' | 'k8s' | 'tsure' | null;
   labels: Record<string, string>;
+  toolLabels: string[];
   klaredIds: string[];
+}
+
+export type ZeroTrustServiceType = 'HTTP' | 'HTTPS' | 'TCP' | 'SSH' | 'RDP';
+
+export interface ZeroTrustUrlEntry {
+  serviceName: string;
+  namespace: string;
+  serviceType: string;
+  clusterIp: string;
+  port: number;
+  portName?: string;
+  ztType: ZeroTrustServiceType;
+  /** Short DNS valid within the same namespace: "<svc>:<port>" */
+  shortTarget: string;
+  /** Cluster FQDN valid from any namespace: "<svc>.<ns>.svc.cluster.local:<port>" */
+  fqdnTarget: string;
+  /** Recommended target for the Cloudflare Zero Trust URL field */
+  recommendedTarget: string;
+  /** Full URL with scheme (e.g. "http://web:80" or "tcp://flotip-rw:5432") */
+  fullUrl: string;
+  /** True when the Service lives in the same namespace as the tunnel */
+  sameNamespace: boolean;
 }
 
 export interface ServiceEndpointInfo {
@@ -107,8 +118,6 @@ export interface TunnelInfo {
   statusLabel: string;
   /** Namespace node-selector read-only from k3access */
   namespaceNodeSelector: string | null;
-  /** Optional extra node label affinity applied to the Deployment (e.g. "flotip=true") */
-  extraNodeLabel: string | null;
   /** Non-tunnel app pods running in this namespace (for tailnet cross-node hint) */
   appPodNodes: string[];
   crossNodeTrafficWarning: boolean;
@@ -148,6 +157,7 @@ export interface ClusterSnapshot {
   agents: NodeAgentInfo[];
   namespaces: NamespaceMeta[];
   tunnels: TunnelInfo[];
+  services: ServiceEndpointInfo[];
   orphans: OrphanAuditReport;
   podNodeSelectorEnabled: boolean | null;
   fetchedAt: Date;

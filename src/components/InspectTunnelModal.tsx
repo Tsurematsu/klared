@@ -1,16 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Box, Text, useInput, useWindowSize } from 'ink';
 import type { TunnelInfo } from '../types/k8s.js';
-import {
-  formatCompactNodeLabel,
-  formatNodeSelectorDisplay,
-} from '../utils/validation.js';
+import { formatNodeSelectorDisplay } from '../utils/validation.js';
 import {
   fetchTunnelLogs,
   restartTunnel,
   togglePauseTunnel,
 } from '../services/tunnels.js';
-import { copyToClipboard } from '../services/clipboard.js';
 
 export interface InspectTunnelModalProps {
   tunnel: TunnelInfo;
@@ -148,25 +144,6 @@ export const InspectTunnelModal: React.FC<InspectTunnelModalProps> = ({
         return;
       }
       if (lower === 'c') {
-        const allUrls = tunnel.services.flatMap((s) => s.suggestedUrls);
-        if (allUrls.length === 0) {
-          setFeedback({
-            type: 'error',
-            text: `No hay Services TCP en "${tunnel.namespace}" para copiar URL.`,
-          });
-          return;
-        }
-        if (allUrls.length === 1) {
-          const url = allUrls[0]!;
-          void copyToClipboard(url).then((res) => {
-            setFeedback(
-              res.ok
-                ? { type: 'success', text: `Copiado (${res.method}): ${url}` }
-                : { type: 'error', text: res.error ?? 'No se pudo copiar.' },
-            );
-          });
-          return;
-        }
         onOpenCopyUrl();
       }
     },
@@ -194,19 +171,15 @@ export const InspectTunnelModal: React.FC<InspectTunnelModalProps> = ({
       <Text wrap="truncate-end">
         <Text bold>{tunnel.statusLabel}</Text> ({tunnel.readyReplicas}/{tunnel.replicas}) · img:{' '}
         <Text dimColor>{tunnel.imageVersion}</Text> · proto:{' '}
-        <Text color="cyan">{tunnel.protocol}</Text> · label:{' '}
-        <Text color={tunnel.extraNodeLabel ? 'yellow' : 'gray'}>
-          {formatCompactNodeLabel(tunnel.extraNodeLabel)}
-        </Text>{' '}
-        · permitidos:{' '}
+        <Text color="cyan">{tunnel.protocol}</Text> · permitidos:{' '}
         <Text color={tunnel.allowedAgents.length > 0 ? 'green' : 'red'}>
           {tunnel.allowedAgents.join(', ') || 'NINGUNO'}
         </Text>
       </Text>
 
       <Text dimColor wrap="truncate-end">
-        Labels: {tunnel.nodeLabelKey} · {tunnel.namespaceLabelKey}
-        {tunnel.extraNodeLabel ? ` · afinidad: ${tunnel.extraNodeLabel}` : ''}
+        Labels: {tunnel.nodeLabelKey}
+        {tunnel.namespace !== 'default' ? ` · ${tunnel.namespaceLabelKey}` : ''}
         {tunnel.namespaceNodeSelector
           ? ` · ns-afinidad: ${formatNodeSelectorDisplay(tunnel.namespaceNodeSelector)}`
           : ''}
