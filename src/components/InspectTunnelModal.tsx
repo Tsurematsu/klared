@@ -88,7 +88,8 @@ export const InspectTunnelModal: React.FC<InspectTunnelModalProps> = ({
 
       <Text wrap="truncate-end">
         <Text bold>{tunnel.statusLabel}</Text> ({tunnel.readyReplicas}/{tunnel.replicas}) · img:{' '}
-        <Text dimColor>{tunnel.imageVersion}</Text> · permitidos:{' '}
+        <Text dimColor>{tunnel.imageVersion}</Text> · proto:{' '}
+        <Text color="cyan">{tunnel.protocol}</Text> · permitidos:{' '}
         <Text color={tunnel.allowedAgents.length > 0 ? 'green' : 'red'}>
           {tunnel.allowedAgents.join(', ') || 'NINGUNO'}
         </Text>

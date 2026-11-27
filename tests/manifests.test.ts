@@ -49,10 +49,49 @@ describe('Generador de manifiestos (Secret + Deployment)', () => {
     assert.match(yaml, /whenUnsatisfiable: ScheduleAnyway/);
     assert.match(yaml, /tolerationSeconds: 30/);
     assert.match(yaml, /image: "cloudflare\/cloudflared:2026\.2\.0"/);
+    assert.match(yaml, /"--protocol","http2"/);
+    assert.match(yaml, /startupProbe:/);
+    assert.match(yaml, /failureThreshold: 18/);
     assert.match(yaml, /name: TUNNEL_TOKEN/);
     assert.match(yaml, /path: \/ready/);
     assert.match(yaml, /port: 2000/);
     assert.equal(yaml.includes(token), false);
+  });
+
+  it('permite configurar protocolo auto o quic y rechaza protocolos inválidos', () => {
+    const autoYaml = buildDeploymentManifest({
+      name: 'web',
+      namespace: 'apps',
+      tunnelId: '11aa22',
+      agents: ['k3s-agent1'],
+      replicas: 1,
+      imageVersion: '2026.2.0',
+      protocol: 'auto',
+    });
+    assert.match(autoYaml, /"--protocol","auto"/);
+
+    const quicYaml = buildDeploymentManifest({
+      name: 'web',
+      namespace: 'apps',
+      tunnelId: '11aa22',
+      agents: ['k3s-agent1'],
+      replicas: 1,
+      imageVersion: '2026.2.0',
+      protocol: 'quic',
+    });
+    assert.match(quicYaml, /"--protocol","quic"/);
+
+    assert.throws(() =>
+      buildDeploymentManifest({
+        name: 'web',
+        namespace: 'apps',
+        tunnelId: '11aa22',
+        agents: ['k3s-agent1'],
+        replicas: 1,
+        imageVersion: '2026.2.0',
+        protocol: 'invalid' as never,
+      }),
+    );
   });
 
   it('combina Secret y Deployment separados por --- y rechaza latest', () => {

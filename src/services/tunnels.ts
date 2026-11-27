@@ -12,6 +12,7 @@ import type {
   TunnelHealthStatus,
   TunnelInfo,
   TunnelPodInfo,
+  TunnelProtocol,
 } from '../types/k8s.js';
 import {
   AGENTS_ANNOTATION,
@@ -20,14 +21,18 @@ import {
   buildResourceName,
   CLOUDFLARED_MANAGED_LABEL_KEY,
   computeAgentEligibility,
+  DEFAULT_TUNNEL_PROTOCOL,
   DESCRIPTION_ANNOTATION,
   DESIRED_REPLICAS_ANNOTATION,
   extractImageVersion,
   extractTunnelLogicalName,
+  extractTunnelProtocol,
   extractTunnelToken,
+  summarizeCloudflaredLogDiagnostic,
   TUNNEL_ID_ANNOTATION,
   validateImageVersion,
   validateTunnelName,
+  validateTunnelProtocol,
 } from '../utils/validation.js';
 import { runKubectl, runKubectlJson } from './kubectl.js';
 import {
@@ -62,6 +67,7 @@ interface K8sDeploymentItem {
         containers?: Array<{
           name?: string;
           image?: string;
+          args?: string[];
         }>;
       };
     };
@@ -311,8 +317,10 @@ export async function getClusterSnapshot(): Promise<ClusterSnapshot> {
     const namespaceLabelKey = buildNamespaceLabelKey(tunnelId);
     const description = annotations[DESCRIPTION_ANNOTATION] ?? '';
 
-    const image = dep.spec?.template?.spec?.containers?.[0]?.image ?? '';
+    const container = dep.spec?.template?.spec?.containers?.[0];
+    const image = container?.image ?? '';
     const imageVersion = extractImageVersion(image);
+    const protocol = extractTunnelProtocol(container?.args);
     const replicas = dep.spec?.replicas ?? 1;
     const readyReplicas = dep.status?.readyReplicas ?? 0;
     const availableReplicas = dep.status?.availableReplicas ?? 0;
@@ -422,6 +430,7 @@ export async function getClusterSnapshot(): Promise<ClusterSnapshot> {
       description,
       image,
       imageVersion,
+      protocol,
       replicas,
       readyReplicas,
       availableReplicas,
@@ -495,6 +504,7 @@ export interface InstallTunnelParams {
   agents: string[];
   replicas: number;
   imageVersion: string;
+  protocol?: TunnelProtocol;
   description?: string;
 }
 
@@ -521,6 +531,12 @@ export async function installTunnel(
   const versionCheck = validateImageVersion(params.imageVersion);
   if (!versionCheck.valid) {
     throw new Error(versionCheck.error ?? 'Versión de imagen inválida.');
+  }
+  const protocolCheck = validateTunnelProtocol(
+    params.protocol ?? DEFAULT_TUNNEL_PROTOCOL,
+  );
+  if (!protocolCheck.valid) {
+    throw new Error(protocolCheck.error ?? 'Protocolo de túnel inválido.');
   }
 
   const cleanName = params.name.trim();
@@ -664,6 +680,7 @@ export async function installTunnel(
       agents: uniqueAgents,
       replicas: params.replicas,
       imageVersion: versionCheck.normalized,
+      protocol: protocolCheck.normalized,
       description: params.description,
       token: tokenCheck.token,
     });
@@ -715,13 +732,10 @@ export async function installTunnel(
     if (appliedResources) {
       try {
         const logsRes = await runKubectl(
-          ['logs', '-n', namespace, '-l', `app=${resourceName}`, '--tail=8'],
+          ['logs', '-n', namespace, '-l', `app=${resourceName}`, '--tail=30'],
           { timeoutMs: 6_000, redact: [tokenCheck.token] },
         );
-        const snippet = logsRes.stdout.trim();
-        if (snippet) {
-          diagnosticHint = ` | Logs: ${snippet.split('\n').slice(-2).join(' / ')}`;
-        }
+        diagnosticHint = summarizeCloudflaredLogDiagnostic(logsRes.stdout);
       } catch {
         // ignore if pod has no logs yet
       }

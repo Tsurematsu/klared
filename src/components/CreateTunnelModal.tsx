@@ -5,13 +5,16 @@ import type {
   NodeAgentInfo,
   OperationStepLog,
   TunnelInfo,
+  TunnelProtocol,
 } from '../types/k8s.js';
 import {
   buildResourceName,
   computeAgentEligibility,
   DEFAULT_CLOUDFLARED_VERSION,
+  DEFAULT_TUNNEL_PROTOCOL,
   extractTunnelToken,
   formatNodeSelectorDisplay,
+  TUNNEL_PROTOCOLS,
   validateImageVersion,
   validateTunnelName,
 } from '../utils/validation.js';
@@ -32,8 +35,14 @@ export interface CreateTunnelModalProps {
   onCancel: () => void;
 }
 
-type FieldId = 0 | 1 | 2 | 3 | 4 | 5 | 6;
-// 0: name, 1: token, 2: namespace, 3: agents, 4: replicas, 5: imageVersion, 6: description
+type FieldId = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+// 0: name, 1: token, 2: namespace, 3: agents, 4: replicas, 5: protocol, 6: imageVersion, 7: description
+
+const PROTOCOL_HINTS: Record<TunnelProtocol, string> = {
+  http2: 'TCP 7844/443 (recomendado, evita bloqueos UDP)',
+  auto: 'QUIC primero con fallback a HTTP/2',
+  quic: 'UDP 7844 (requiere salida UDP permitida)',
+};
 
 export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
   nodes,
@@ -56,6 +65,7 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
   const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
   const [agentCursor, setAgentCursor] = useState(0);
   const [replicas, setReplicas] = useState(1);
+  const [protocol, setProtocol] = useState<TunnelProtocol>(DEFAULT_TUNNEL_PROTOCOL);
   const [imageVersion, setImageVersion] = useState(DEFAULT_CLOUDFLARED_VERSION);
   const [versionSource, setVersionSource] = useState<'loading' | 'github' | 'fallback'>('loading');
   const [description, setDescription] = useState('');
@@ -176,7 +186,7 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
 
     if (!versionCheck.valid) {
       setError(versionCheck.error ?? 'Versión de imagen inválida.');
-      setFocusField(5);
+      setFocusField(6);
       return;
     }
 
@@ -191,6 +201,7 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
           agents: selectedAgents,
           replicas,
           imageVersion: versionCheck.normalized,
+          protocol,
           description,
         },
         (progress) => setSteps(progress),
@@ -239,7 +250,7 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
       }
 
       if (key.tab) {
-        setFocusField((prev) => ((prev + 1) % 7) as FieldId);
+        setFocusField((prev) => ((prev + 1) % 8) as FieldId);
         return;
       }
 
@@ -274,11 +285,11 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
       }
 
       if (key.downArrow) {
-        setFocusField((prev) => (prev < 6 ? ((prev + 1) as FieldId) : 0));
+        setFocusField((prev) => (prev < 7 ? ((prev + 1) as FieldId) : 0));
         return;
       }
       if (key.upArrow) {
-        setFocusField((prev) => (prev > 0 ? ((prev - 1) as FieldId) : 6));
+        setFocusField((prev) => (prev > 0 ? ((prev - 1) as FieldId) : 7));
         return;
       }
 
@@ -320,6 +331,27 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
         }
         if (key.return) {
           setFocusField(5);
+          return;
+        }
+      }
+
+      if (focusField === 5) {
+        const curIdx = TUNNEL_PROTOCOLS.indexOf(protocol);
+        if (key.leftArrow) {
+          const nextIdx =
+            (curIdx - 1 + TUNNEL_PROTOCOLS.length) % TUNNEL_PROTOCOLS.length;
+          setProtocol(TUNNEL_PROTOCOLS[nextIdx]!);
+          setError(null);
+          return;
+        }
+        if (key.rightArrow || input === ' ') {
+          const nextIdx = (curIdx + 1) % TUNNEL_PROTOCOLS.length;
+          setProtocol(TUNNEL_PROTOCOLS[nextIdx]!);
+          setError(null);
+          return;
+        }
+        if (key.return) {
+          setFocusField(6);
           return;
         }
       }
@@ -512,10 +544,21 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
         </Text>
       </Box>
 
-      {/* 5. Versión fija */}
+      {/* 5. Protocolo */}
       <Box>
         <Text bold={focusField === 5} color={focusField === 5 ? 'cyan' : undefined}>
-          {focusField === 5 ? '▸ ' : '  '}Imagen tag:  
+          {focusField === 5 ? '▸ ' : '  '}Protocolo:   
+        </Text>
+        <Text bold color="cyan">
+          ◀ {protocol} ▶
+        </Text>
+        <Text dimColor>  {PROTOCOL_HINTS[protocol]}</Text>
+      </Box>
+
+      {/* 6. Versión fija */}
+      <Box>
+        <Text bold={focusField === 6} color={focusField === 6 ? 'cyan' : undefined}>
+          {focusField === 6 ? '▸ ' : '  '}Imagen tag:  
         </Text>
         <TextInput
           value={imageVersion}
@@ -523,8 +566,8 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
             setImageVersion(val);
             setError(null);
           }}
-          onSubmit={() => setFocusField(6)}
-          focus={focusField === 5}
+          onSubmit={() => setFocusField(7)}
+          focus={focusField === 6}
           placeholder={DEFAULT_CLOUDFLARED_VERSION}
         />
         <Text dimColor>
@@ -540,10 +583,10 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
         ) : null}
       </Box>
 
-      {/* 6. Descripción */}
+      {/* 7. Descripción */}
       <Box>
-        <Text bold={focusField === 6} color={focusField === 6 ? 'cyan' : undefined}>
-          {focusField === 6 ? '▸ ' : '  '}Descripción: 
+        <Text bold={focusField === 7} color={focusField === 7 ? 'cyan' : undefined}>
+          {focusField === 7 ? '▸ ' : '  '}Descripción: 
         </Text>
         <TextInput
           value={description}
@@ -551,13 +594,13 @@ export const CreateTunnelModal: React.FC<CreateTunnelModalProps> = ({
           onSubmit={() => {
             void handleInstall();
           }}
-          focus={focusField === 6}
+          focus={focusField === 7}
           placeholder="opcional (Enter para instalar)"
         />
       </Box>
 
       {error ? (
-        <Text color="red" bold wrap="truncate-end">
+        <Text color="red" bold>
           ✗ {error}
         </Text>
       ) : null}

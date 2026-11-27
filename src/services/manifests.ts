@@ -1,14 +1,17 @@
+import type { TunnelProtocol } from '../types/k8s.js';
 import {
   AGENTS_ANNOTATION,
   buildNodeLabelKey,
   buildResourceName,
   CLOUDFLARED_MANAGED_LABEL_KEY,
   DEFAULT_CLOUDFLARED_VERSION,
+  DEFAULT_TUNNEL_PROTOCOL,
   DESCRIPTION_ANNOTATION,
   TUNNEL_ID_ANNOTATION,
   validateImageVersion,
   validateTunnelId,
   validateTunnelName,
+  validateTunnelProtocol,
 } from '../utils/validation.js';
 
 export interface SecretManifestParams {
@@ -24,6 +27,7 @@ export interface DeploymentManifestParams {
   agents: string[];
   replicas: number;
   imageVersion: string;
+  protocol?: TunnelProtocol;
   description?: string;
 }
 
@@ -74,12 +78,28 @@ export function buildDeploymentManifest(
   if (!versionCheck.valid) {
     throw new Error(versionCheck.error ?? 'Versión de imagen inválida.');
   }
+  const protocolCheck = validateTunnelProtocol(
+    params.protocol ?? DEFAULT_TUNNEL_PROTOCOL,
+  );
+  if (!protocolCheck.valid) {
+    throw new Error(protocolCheck.error ?? 'Protocolo de túnel inválido.');
+  }
   if (params.agents.length === 0) {
     throw new Error('Debes seleccionar al menos un agente permitido.');
   }
   if (!Number.isInteger(params.replicas) || params.replicas < 0) {
     throw new Error('El número de réplicas debe ser un entero mayor o igual a 0.');
   }
+
+  const containerArgs = [
+    'tunnel',
+    '--no-autoupdate',
+    '--protocol',
+    protocolCheck.normalized,
+    '--metrics',
+    '0.0.0.0:2000',
+    'run',
+  ];
 
   const resourceName = buildResourceName(params.name);
   const namespace = params.namespace.trim();
@@ -147,7 +167,7 @@ export function buildDeploymentManifest(
     '      containers:',
     '        - name: cloudflared',
     `          image: ${yamlString(`cloudflare/cloudflared:${versionCheck.normalized}`)}`,
-    '          args: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"]',
+    `          args: ${JSON.stringify(containerArgs)}`,
     '          env:',
     '            - name: TUNNEL_TOKEN',
     '              valueFrom:',
@@ -161,6 +181,13 @@ export function buildDeploymentManifest(
     '            limits:',
     '              cpu: 200m',
     '              memory: 128Mi',
+    '          startupProbe:',
+    '            httpGet:',
+    '              path: /ready',
+    '              port: 2000',
+    '            initialDelaySeconds: 5',
+    '            periodSeconds: 5',
+    '            failureThreshold: 18',
     '          readinessProbe:',
     '            httpGet:',
     '              path: /ready',

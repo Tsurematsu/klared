@@ -1,4 +1,4 @@
-import type { AgentEligibility, NodeAgentInfo } from '../types/k8s.js';
+import type { AgentEligibility, NodeAgentInfo, TunnelProtocol } from '../types/k8s.js';
 
 export const TSURE_PREFIX = 'tsure.io/';
 export const CLOUDFLARED_RESOURCE_PREFIX = 'cloudflared-';
@@ -16,6 +16,12 @@ export const K8S_NODE_SELECTOR_ANNOTATION =
 export const TSURE_NODE_SELECTOR_ANNOTATION = 'tsure.io/node-selector';
 
 export const DEFAULT_CLOUDFLARED_VERSION = '2026.2.0';
+export const TUNNEL_PROTOCOLS: readonly TunnelProtocol[] = [
+  'http2',
+  'auto',
+  'quic',
+] as const;
+export const DEFAULT_TUNNEL_PROTOCOL: TunnelProtocol = 'http2';
 
 export const PROTECTED_NAMESPACES = new Set<string>([
   'default',
@@ -412,4 +418,69 @@ export function extractImageVersion(image: string): string {
     return '-';
   }
   return image.slice(idx + 1);
+}
+
+export function validateTunnelProtocol(protocol: string | undefined): {
+  valid: boolean;
+  normalized: TunnelProtocol;
+  error?: string;
+} {
+  const raw = (protocol ?? DEFAULT_TUNNEL_PROTOCOL).trim().toLowerCase();
+  if (raw === 'http2' || raw === 'auto' || raw === 'quic') {
+    return { valid: true, normalized: raw };
+  }
+  return {
+    valid: false,
+    normalized: DEFAULT_TUNNEL_PROTOCOL,
+    error: `Protocolo inválido "${protocol ?? ''}". Usa http2, auto o quic.`,
+  };
+}
+
+export function extractTunnelProtocol(args?: string[]): TunnelProtocol {
+  if (!args || args.length === 0) return 'auto';
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] ?? '';
+    if (arg === '--protocol' || arg === '-p') {
+      const next = (args[i + 1] ?? '').trim().toLowerCase();
+      if (next === 'http2' || next === 'auto' || next === 'quic') {
+        return next;
+      }
+    } else if (arg.startsWith('--protocol=')) {
+      const val = arg.slice('--protocol='.length).trim().toLowerCase();
+      if (val === 'http2' || val === 'auto' || val === 'quic') {
+        return val;
+      }
+    }
+  }
+  return 'auto';
+}
+
+export function summarizeCloudflaredLogDiagnostic(rawLogs: string): string {
+  const lines = rawLogs
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return '';
+
+  const joined = lines.join('\n');
+
+  if (
+    /failed to dial.*quic|QUIC connection failed|suggested_protocol=http2/i.test(
+      joined,
+    )
+  ) {
+    return ' | Causa probable: QUIC (UDP 7844) bloqueado o sin respuesta en la red. Usa protocolo "http2".';
+  }
+
+  if (
+    /Unauthorized|invalid tunnel token|failed to decode|not valid.*token|Provided Tunnel token is not valid/i.test(
+      joined,
+    )
+  ) {
+    return ' | Causa probable: token de Cloudflare inválido o revocado.';
+  }
+
+  const errorLines = lines.filter((l) => /\b(ERR|FTL)\b|error=/i.test(l));
+  const picked = (errorLines.length > 0 ? errorLines : lines).slice(-2);
+  return ` | Logs: ${picked.join(' / ')}`;
 }

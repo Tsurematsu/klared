@@ -55,6 +55,8 @@ export interface TunnelPodInfo {
   waitingReason?: string;
 }
 
+export type TunnelProtocol = 'http2' | 'auto' | 'quic';
+
 export type TunnelHealthStatus =
   | 'ready'
   | 'rolling'
@@ -74,6 +76,7 @@ export interface TunnelInfo {
   description: string;
   image: string;
   imageVersion: string;
+  protocol: TunnelProtocol;
   replicas: number;
   readyReplicas: number;
   availableReplicas: number;

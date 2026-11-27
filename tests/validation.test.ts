@@ -5,14 +5,17 @@ import {
   buildNodeLabelKey,
   buildResourceName,
   computeAgentEligibility,
+  extractTunnelProtocol,
   extractTunnelToken,
   formatNodeSelectorDisplay,
   maskTokenForDisplay,
   parseNodeSelector,
   redactSecrets,
+  summarizeCloudflaredLogDiagnostic,
   validateImageVersion,
   validateTunnelId,
   validateTunnelName,
+  validateTunnelProtocol,
 } from '../src/utils/validation.js';
 import type { NodeAgentInfo } from '../src/types/k8s.js';
 
@@ -199,5 +202,49 @@ describe('computeAgentEligibility (exclusión de control-plane y afinidad k3acce
       'kubernetes.io/hostname=k3s-agent3',
     );
     assert.equal(res.filter((r) => r.eligible).length, 0);
+  });
+});
+
+describe('Protocolo de túnel y diagnóstico de logs cloudflared', () => {
+  it('valida y extrae protocolo desde args del contenedor', () => {
+    assert.deepEqual(validateTunnelProtocol('http2'), {
+      valid: true,
+      normalized: 'http2',
+    });
+    assert.deepEqual(validateTunnelProtocol('AUTO'), {
+      valid: true,
+      normalized: 'auto',
+    });
+    assert.equal(validateTunnelProtocol('grpc').valid, false);
+
+    assert.equal(
+      extractTunnelProtocol(['tunnel', '--protocol', 'http2', 'run']),
+      'http2',
+    );
+    assert.equal(
+      extractTunnelProtocol(['tunnel', '--protocol=quic', 'run']),
+      'quic',
+    );
+    assert.equal(
+      extractTunnelProtocol(['tunnel', '--no-autoupdate', 'run']),
+      'auto',
+    );
+  });
+
+  it('identifica QUIC bloqueado, token inválido y líneas ERR en logs', () => {
+    const quicHint = summarizeCloudflaredLogDiagnostic(
+      'INF precheck component="UDP Connectivity" details="QUIC connection failed"\nINF precheck complete suggested_protocol=http2',
+    );
+    assert.match(quicHint, /QUIC.*http2/i);
+
+    const tokenHint = summarizeCloudflaredLogDiagnostic(
+      'ERR Provided Tunnel token is not valid',
+    );
+    assert.match(tokenHint, /token.*inválido/i);
+
+    const errHint = summarizeCloudflaredLogDiagnostic(
+      'INF Starting tunnel\nERR some unexpected edge error\nINF other info',
+    );
+    assert.match(errHint, /some unexpected edge error/);
   });
 });
