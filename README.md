@@ -1,9 +1,15 @@
+<div align="center">
+
+<img src="images/logo.jpeg" alt="Logo de klared" width="220" />
+
 # `klared` — Gestor TUI de Túneles `cloudflared` para k3s (`tsure.io/*`)
 
 ![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![Ink](https://img.shields.io/badge/TUI-React%2019%20%2B%20Ink%208-61DAFB?logo=react&logoColor=black)
 ![Kubernetes](https://img.shields.io/badge/Kubernetes-k3s%20%2F%20kubectl-326CE5?logo=kubernetes&logoColor=white)
+
+</div>
 
 Herramienta interactiva de terminal (**TUI**) para instalar y administrar **túneles de Cloudflare administrados por dashboard** (*remotely-managed*, con token) dentro de un clúster **k3s**, sin operadores, sin CRDs y con consumo mínimo de RAM/CPU.
 

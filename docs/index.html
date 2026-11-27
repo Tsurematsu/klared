@@ -8,13 +8,14 @@
       name="description"
       content="Herramienta TUI local dependiente de kubectl para instalar y administrar túneles Cloudflare (cloudflared) en k3s con afinidad por agente, traslado sin corte y contrato tsure.io/*."
     />
+    <link rel="icon" type="image/jpeg" href="./images/logo.jpeg" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <header class="navbar">
       <div class="container navbar-inner">
         <a class="brand" href="#inicio">
-          <span class="brand-dot" aria-hidden="true"></span>
+          <img class="brand-logo" src="./images/logo.jpeg" alt="Logo de klared" />
           <span>klared</span>
           <span class="brand-tag">tsure.io/*</span>
         </a>
@@ -40,6 +41,9 @@
       <!-- Hero -->
       <section class="hero">
         <div class="container">
+          <div class="hero-logo-wrap">
+            <img class="hero-logo" src="./images/logo.jpeg" alt="Logo de klared" />
+          </div>
           <div class="eyebrow">● kubectl local · k3s agents · cloudflared · React 19 + Ink 8</div>
           <h1>
             Instala y mueve túneles <span class="gradient-text">cloudflared</span> en k3s sin cortar el tráfico.
