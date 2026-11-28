@@ -123,13 +123,13 @@ Los instaladores detectan automáticamente la última release en GitHub, verific
 **Linux (x64):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Tsurematsu/klared/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/k3stool/klared/main/scripts/install.sh | bash
 ```
 
 **Windows (x64 — PowerShell):**
 
 ```powershell
-curl.exe -fsSL https://raw.githubusercontent.com/Tsurematsu/klared/main/scripts/install.ps1 -o "$env:TEMP\klared-install.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\klared-install.ps1"
+curl.exe -fsSL https://raw.githubusercontent.com/k3stool/klared/main/scripts/install.ps1 -o "$env:TEMP\klared-install.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\klared-install.ps1"
 ```
 
 Una vez instalado:

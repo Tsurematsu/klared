@@ -30,11 +30,11 @@ Es la cuarta herramienta de un ecosistema personal. Debe sentirse igual que las 
 
 | Herramienta | Qué hace | Referencia |
 |---|---|---|
-| `tacl` | ACLs de Headscale (HuJSON, protección SSH) | https://tsurematsu.github.io/tacl/ |
-| `kpg` | PostgreSQL con CloudNativePG (traslado entre nodos, backups) | https://tsurematsu.github.io/kpg/ |
-| `k3access` | Namespaces de k3s con afinidad por agente y contrato `tsure.io/*` | https://tsurematsu.github.io/k3acess/ |
+| `tacl` | ACLs de Headscale (HuJSON, protección SSH) | https://k3stool.github.io/tacl/ |
+| `kpg` | PostgreSQL con CloudNativePG (traslado entre nodos, backups) | https://k3stool.github.io/kpg/ |
+| `k3access` | Namespaces de k3s con afinidad por agente y contrato `tsure.io/*` | https://k3stool.github.io/k3acess/ |
 
-Repos: `github.com/Tsurematsu/tacl`, `github.com/Tsurematsu/kpg`, `github.com/Tsurematsu/k3acess`.
+Repos: `github.com/k3stool/tacl`, `github.com/k3stool/kpg`, `github.com/k3stool/k3acess`.
 
 **Tarea previa obligatoria:** revisa `k3access` (es la referencia principal de stack y estructura) y `kpg` (referencia del sistema de labels y del traslado entre nodos). Replica sus convenciones de estructura de proyecto, pre-flight, manejo de errores, instalador y publicación de binarios. Si algo de este documento contradice lo que ves en esos repos, **pregunta antes de decidir**.
 

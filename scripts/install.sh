@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="Tsurematsu/klared"
+REPO="k3stool/klared"
 BIN_NAME="klared"
 ASSET_NAME="klared-linux-x64"
 FORCE="false"

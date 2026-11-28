@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'Tsurematsu/klared'
+$Repo = 'k3stool/klared'
 $BinName = 'klared.exe'
 $AssetName = 'klared-win-x64.exe'
 
